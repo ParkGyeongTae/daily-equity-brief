@@ -51,9 +51,11 @@
 
 ```bash
 # 최근 7일 내 작성한 브리프의 종목 코드
+# date 는 BSD(macOS)와 GNU(Linux)의 상대날짜 문법이 다르다 — 둘 다 시도한다.
+CUTOFF=$(TZ=Asia/Seoul date -v-7d +%F 2>/dev/null || TZ=Asia/Seoul date -d '7 days ago' +%F)
 ls briefs/*.md 2>/dev/null \
   | sed -n 's#briefs/\([0-9-]\{10\}\)-\(.*\)\.md#\1 \2#p' \
-  | awk -v cutoff="$(date -v-7d +%F)" '$1 >= cutoff'
+  | awk -v cutoff="$CUTOFF" '$1 >= cutoff'
 ```
 
 같은 회사를 다른 저장소에 쌓아두고 있다면 그쪽도 함께 본다(로컬에 있을 때만).
@@ -77,8 +79,9 @@ git -C ../stock-research log --since='7 days ago' --name-only --pretty=format: -
 재현되지 않으므로, 뉴스를 찾기 **전에** 먼저 판정한다.
 
 ```bash
-# KST 날짜 기준. 10#을 빼면 08·09일에 8진수로 해석돼 죽는다.
-[ $(( 10#$(date +%d) % 2 )) -eq 0 ] && echo "미국 (SEC EDGAR)" || echo "한국 (DART/KIND)"
+# KST 고정. TZ를 빼면 로컬 타임존 날짜로 판정돼 시장이 뒤집힌다.
+# 10#을 빼면 08·09일에 8진수로 해석돼 죽는다.
+[ $(( 10#$(TZ=Asia/Seoul date +%d) % 2 )) -eq 0 ] && echo "미국 (SEC EDGAR)" || echo "한국 (DART/KIND)"
 ```
 
 - 판정 기준은 **KST 날짜**다. 미국 종목을 쓰는 날에도 기준 종가는 직전 **확정** 거래일이므로,
@@ -143,6 +146,14 @@ git -C ../stock-research log --since='7 days ago' --name-only --pretty=format: -
 ### 시장 데이터 (타이밍 근거)
 
 주가·거래량·시가총액은 공시에 없다. **이 항목만 2차 출처를 허용한다.**
+
+원자료는 **저장소 밖 스크래치패드**에 둔다. 아래 명령들이 쓰는 `$SCRATCH`를 먼저 정의한다.
+
+```bash
+# 날짜로 고정한다. 셸 상태는 명령 사이에 유지되지 않으므로, 4·5단계에서 명령을 부를 때마다
+# 이 줄을 앞에 붙인다. mktemp 로 잡으면 호출마다 새 폴더가 생겨 원자료와 지표가 갈라진다.
+SCRATCH="${TMPDIR:-/tmp}/equity-brief/$(TZ=Asia/Seoul date +%F)"; mkdir -p "$SCRATCH"
+```
 
 ```bash
 # 키 불필요. 한국 종목은 005930.KS / 코스닥은 .KQ. 표준 라이브러리만 쓴다.
