@@ -10,7 +10,8 @@ export default defineConfig({
   base: '/daily-equity-brief/',
 
   // srcDir는 레포 루트. briefs/YYYY-MM-DD-*.md 경로 규칙(AGENTS.md)을 그대로 쓴다.
-  srcExclude: ['README.md'],
+  // CLAUDE.md는 AGENTS.md 심볼릭 링크 — 중복 페이지가 생기지 않게 제외한다.
+  srcExclude: ['README.md', 'CLAUDE.md'],
   cleanUrls: true,
   lastUpdated: true,
 
