@@ -8,8 +8,8 @@
 **이 스크립트가 검사하지 못하는 것**이 검사하는 것보다 중요하다. 숫자가 공시 원문과
 일치하는지, 논거가 타당한지, 출처 URL이 실제로 그 숫자를 담고 있는지는 사람과
 `brief-verifier` 서브에이전트의 몫이다. 여기서 보는 것은 **기계가 판정할 수 있는 것뿐**이다
-— 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 9절의 구조적 요건
-(가격·논거 무효화 쌍, R 계산식, 근거 태그), 출처 절의 필수 항목, 기준 종가일 일관성.
+— 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
+요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 출처 절의 필수 항목, 기준 종가일 일관성.
 
 통과(exit 0)는 "이 브리프가 옳다"가 아니라 "형식 때문에 틀릴 일은 없다"는 뜻이다.
 """
@@ -232,6 +232,19 @@ def check_plan(rep: Report, sections: list[dict]) -> None:
             rep.err(i, f"9절 '{head}' 행에 근거 태그가 없다 — [공시]/[기술]/[이벤트] 중 하나")
 
 
+def check_selection(rep: Report, sections: list[dict]) -> None:
+    """선정을 사용자에게 묻지 않으므로, 점수표가 1절에 남아야 근거를 되짚을 수 있다."""
+    sec = section_by_number(sections, 1)
+    if sec is None:
+        return
+    rows = table_rows(sec)
+    text = body_text(sec)
+    if not rows or "합계" not in text:
+        rep.err(sec["line"], "1절에 후보 점수표가 없다 — ①~⑤와 합계를 탈락 후보까지 싣는다(선정을 묻지 않는 대신 남기는 근거다)")
+    elif len(rows) < 2:
+        rep.warn(sec["line"], "1절 점수표에 후보가 하나뿐이다 — 탈락 후보도 함께 남긴다")
+
+
 def check_sources(rep: Report, sections: list[dict], file_date: str) -> None:
     sec = section_by_name(sections, "출처")
     if sec is None:
@@ -302,6 +315,7 @@ def validate(path: Path) -> Report:
     check_sections(rep, sections)
     check_prose(rep, lines)
     check_plan(rep, sections)
+    check_selection(rep, sections)
     check_sources(rep, sections, file_date)
     check_close_date(rep, lines, sections)
     check_method(rep, sections)
