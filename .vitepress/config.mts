@@ -11,6 +11,8 @@ export default defineConfig({
 
   // srcDir는 레포 루트. briefs/YYYY-MM-DD-*.md 경로 규칙(AGENTS.md)을 그대로 쓴다.
   // CLAUDE.md는 AGENTS.md 심볼릭 링크 — 중복 페이지가 생기지 않게 제외한다.
+  // workflow.md는 .claude/skills/daily-brief/SKILL.md 심볼릭 링크다. VitePress가 점(.)으로
+  // 시작하는 디렉터리를 훑지 않으므로, 스킬 문서를 사이트에 싣는 통로로 심볼릭 링크를 쓴다.
   srcExclude: ['README.md', 'CLAUDE.md'],
   cleanUrls: true,
   lastUpdated: true,
@@ -19,6 +21,7 @@ export default defineConfig({
     nav: [
       { text: '브리프', link: '/briefs/' },
       { text: '방법론', link: '/AGENTS' },
+      { text: '작성 절차', link: '/workflow' },
       { text: 'Claude Code 모범 사례', link: '/claude-code-best-practices' },
     ],
 
@@ -31,6 +34,7 @@ export default defineConfig({
             { text: '소개', link: '/' },
             { text: '브리프 목록', link: '/briefs/' },
             { text: '방법론 (AGENTS.md)', link: '/AGENTS' },
+            { text: '작성 절차 (daily-brief 스킬)', link: '/workflow' },
             { text: 'Claude Code 모범 사례', link: '/claude-code-best-practices' },
           ],
         },
