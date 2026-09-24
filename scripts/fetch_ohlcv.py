@@ -27,8 +27,10 @@
 한계
     - 무료·비공식 엔드포인트다. 429(요청 과다)나 스키마 변경으로 언제든 깨질 수 있다.
     - 상장폐지·티커 변경 종목은 빈 응답이 온다. 그때는 종목 코드부터 다시 확인한다.
-    - 장중에 받으면 마지막 봉이 미완성이다. 아래 요약의 "마지막 봉"이 오늘 날짜면
-      종가가 확정되지 않았다는 뜻이므로 보고서 기준일로 쓰지 않는다.
+    - 장중에 받으면 마지막 봉이 미완성이다. 확정 여부는 **거래소의 정규장 시간**으로 판정해
+      `[주의] 마지막 봉이 미확정이다`를 찍는다. 그 경고가 뜨면 보고서 기준일로 쓰지 않는다.
+      (날짜 비교로는 미국 장이 KST 자정을 넘겨 열려 있는 00:00~05:00을 놓친다.)
+    - `1wk`/`1mo`는 진행 중인 주·달의 봉도 미완성이다 — 같은 경고로 알린다.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 # 호스트 둘은 같은 데이터를 주는 미러다. 하나가 429면 다른 쪽을 시도한다.
@@ -95,8 +98,17 @@ def summarize(payload: dict) -> dict:
     if not rows:
         sys.exit("[실패] 종가가 모두 비어 있다 — 거래 이력이 없는 구간이다.")
 
+    try:
+        ex_tz = ZoneInfo(tz)
+    except Exception:  # tzdata에 없는 이름이면 UTC로 떨어뜨린다
+        ex_tz = timezone.utc
+
     def day(epoch: int) -> str:
-        return datetime.fromtimestamp(epoch, timezone.utc).astimezone(KST).strftime("%Y-%m-%d")
+        # 거래일은 거래소의 날짜다. KST로 환산하면 거래소마다 하루가 밀릴 수 있다.
+        return datetime.fromtimestamp(epoch, timezone.utc).astimezone(ex_tz).strftime("%Y-%m-%d")
+
+    period = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
+    session = (period["start"], period["end"]) if {"start", "end"} <= period.keys() else None
 
     has_adj = bool((r.get("indicators", {}).get("adjclose") or [{}])[0].get("adjclose"))
     return {
@@ -109,8 +121,27 @@ def summarize(payload: dict) -> dict:
         "first": day(rows[0][0]),
         "last": day(rows[-1][0]),
         "last_close": rows[-1][1],
+        "last_ts": rows[-1][0],
+        "session": session,
+        "ex_tz": ex_tz,
         "has_adjclose": has_adj,
     }
+
+
+def unconfirmed_reason(s: dict, interval: str, now_epoch: float) -> str | None:
+    """마지막 봉이 아직 확정되지 않았으면 사유를, 확정이면 None을 돌려준다.
+
+    거래소 날짜와 KST 날짜를 비교하는 방식은 미국 장이 KST 자정을 넘겨 열려 있는
+    00:00~05:00에서 장중인데도 '어제 봉'으로 보여 경고를 놓쳤다. 그래서 날짜가 아니라
+    거래소의 **정규장 구간**(meta.currentTradingPeriod.regular)으로 판정한다.
+    """
+    start, end = s["session"]
+    if not start <= now_epoch < end:
+        return None  # 정규장 밖 — 마지막 봉은 확정된 값이다
+    if interval == "1d":
+        # 장이 열렸어도 오늘 봉이 아직 안 생겼으면 마지막 봉은 직전 거래일의 확정 봉이다.
+        return "오늘 장중 봉" if s["last_ts"] >= start else None
+    return {"1wk": "이번 주", "1mo": "이번 달"}[interval] + " 진행 중인 봉"
 
 
 def main() -> None:
@@ -132,16 +163,19 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    now_dt = datetime.now(timezone.utc)
+    now = (f"{now_dt.astimezone(KST):%Y-%m-%d %H:%M KST}"
+           f" (거래소 현지 {now_dt.astimezone(s['ex_tz']):%Y-%m-%d %H:%M})")
     print(f"저장: {out}")
     print(f"종목: {s['symbol']} · {s['exchange']} · {s['currency']} · 거래소 시간대 {s['timezone']}")
     print(f"구간: {s['first']} ~ {s['last']} ({args.interval}, {s['rows']}봉, 결측 {s['null_rows']}봉)")
     print(f"마지막 봉 종가: {s['last_close']}")
     print(f"adjclose 포함: {'예' if s['has_adjclose'] else '아니오'}  (OHLC는 분할 반영·배당 미반영)")
     print(f"조회 시각: {now}")
-    if s["last"] == today:
-        print("[주의] 마지막 봉이 오늘이다 — 장중이면 종가 미확정이므로 보고서 기준일로 쓰지 않는다.")
+    if s["session"] is None:
+        print("[주의] 응답에 정규장 시간이 없어 마지막 봉의 확정 여부를 판정하지 못했다 — 직접 확인한다.")
+    elif (reason := unconfirmed_reason(s, args.interval, now_dt.timestamp())) is not None:
+        print(f"[주의] 마지막 봉이 미확정이다 ({reason}) — 보고서 기준일로 쓰지 말고 직전 확정 봉을 쓴다.")
 
 
 if __name__ == "__main__":
