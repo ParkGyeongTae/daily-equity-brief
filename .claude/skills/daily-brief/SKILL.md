@@ -386,6 +386,32 @@ git push origin main
   8단계를 건너뛰고 오는 경로는 없다.
 - 커밋 훅이 검증을 다시 돌리므로, 여기서 막히면 8단계로 돌아간다.
 
+### 배포 확인
+
+푸시가 곧 게시는 아니다. 배포가 끝났는지 **확인한 뒤** 보고한다.
+
+```bash
+gh run list --workflow=deploy.yml --limit 3
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://parkgyeongtae.github.io/daily-equity-brief/briefs/<파일명>
+```
+
+200이면 됐고, 목록 페이지에 종목명이 뜨는지도 본다.
+
+**브리프가 사이트에 안 보일 때** — 원인은 대개 파일이나 파서가 아니라 배포다.
+`build` 잡은 성공하는데 `deploy` 잡이 `waiting`에서 `queued`로 넘어가지 못하고 멈추는 일이 있다
+(정상일 땐 waiting → queued 가 수 초다. 2026-09-23 보령(003850) 브리프에서 27분 정체).
+이 저장소에는 환경 보호 규칙(승인자·대기 타이머)이 없으므로 설정 문제가 아니라 GitHub 쪽 큐 정체다.
+`gh api repos/ParkGyeongTae/daily-equity-brief/deployments/<id>/statuses`로 확인할 수 있다.
+
+복구는 **취소가 먼저**다. 워크플로에 `concurrency: {group: pages, cancel-in-progress: false}`가
+걸려 있어, 멈춘 런을 그대로 두고 새로 트리거하면 새 런이 뒤에 줄만 서고 똑같이 멈춘다.
+
+```bash
+gh run cancel <멈춘 런 ID>
+gh workflow run deploy.yml --ref main
+```
+
 마지막으로 사용자에게 **무엇을 왜 골랐고, 검증을 무엇으로 통과했는지**를 증거와 함께 한 번에 보고한다.
 
 ---
