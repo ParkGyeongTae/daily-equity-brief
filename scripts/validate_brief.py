@@ -9,7 +9,8 @@
 일치하는지, 논거가 타당한지, 출처 URL이 실제로 그 숫자를 담고 있는지는 사람과
 `brief-verifier` 서브에이전트의 몫이다. 여기서 보는 것은 **기계가 판정할 수 있는 것뿐**이다
 — 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
-요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 출처 절의 필수 항목, 기준 종가일 일관성.
+요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 출처 절의 필수 항목, 기준 종가일 일관성,
+거시를 쓴 경우의 관측일·조회일 표기.
 
 통과(exit 0)는 "이 브리프가 옳다"가 아니라 "형식 때문에 틀릴 일은 없다"는 뜻이다.
 """
@@ -28,6 +29,9 @@ FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 SEP_ROW_RE = re.compile(r"^\|[\s:|-]+\|$")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 CLOSE_DATE_RE = re.compile(r"기준 종가일[^0-9]{0,10}(\d{4}-\d{2}-\d{2})")
+OBS_DATE_RE = re.compile(r"관측일[^0-9]{0,10}(\d{4}-\d{2}-\d{2})")
+# 거시를 **썼을 때만** 검사한다 — 거시는 선택이고, 기본값은 쓰지 않는 것이다.
+MACRO_RE = re.compile(r"\b(FRED|ECOS)\b")
 TAGS = ("[공시]", "[기술]", "[이벤트]")
 
 # 절 번호 → 제목 일부. 템플릿(AGENTS.md "보고서 템플릿")과 같은 순서다.
@@ -300,6 +304,36 @@ def check_method(rep: Report, sections: list[dict]) -> None:
         rep.err(ln, "방법론 절에 수정주가 기준(--price-field)이 없다")
 
 
+def check_macro(rep: Report, lines: list[str], sections: list[dict], file_date: str) -> None:
+    """거시를 쓴 브리프만 검사한다.
+
+    거시는 개정(revision)되므로 **관측일과 조회일을 함께** 적어야 되짚을 수 있다.
+    가격에 기준 종가일을 요구하는 것과 같은 이유다. 게이트(공시에 연결고리가 있는가)는
+    기계가 판정하지 못한다 — 그건 `brief-verifier`와 사람의 몫이고, 여기서는 **표기만** 본다.
+    """
+    if not MACRO_RE.search("\n".join(lines)):
+        return
+
+    sec = section_by_name(sections, "출처")
+    if sec is not None:
+        ln = sec["line"]
+        macro = [t for _, t in sec["body"] if "(거시)" in t]
+        if not macro:
+            rep.err(ln, "본문이 FRED/ECOS를 쓰는데 출처 절에 `(거시)` 줄이 없다")
+        for line in macro:
+            if not (m := OBS_DATE_RE.search(line)):
+                rep.err(ln, "`(거시)` 줄에 `관측일 YYYY-MM-DD`가 없다 — 거시는 개정되므로 조회일만으로는 되짚지 못한다")
+            elif m.group(1) > file_date:
+                rep.err(ln, f"`(거시)` 줄의 관측일({m.group(1)})이 브리프 날짜({file_date})보다 미래다")
+            if "KST" not in line:
+                rep.err(ln, "`(거시)` 줄에 조회 시각(KST)이 없다")
+
+    sec = section_by_name(sections, "방법론")
+    if sec is not None and "거시" not in body_text(sec):
+        rep.err(sec["line"], "거시를 썼는데 방법론 절에 `거시 지표:` 항목이 없다 "
+                             "— 쓴 계열과 게이트를 통과한 근거(공시 문장)를 적는다")
+
+
 def validate(path: Path) -> Report:
     rep = Report(path)
     m = FILE_RE.match(path.name)
@@ -319,6 +353,7 @@ def validate(path: Path) -> Report:
     check_sources(rep, sections, file_date)
     check_close_date(rep, lines, sections)
     check_method(rep, sections)
+    check_macro(rep, lines, sections, file_date)
     return rep
 
 
