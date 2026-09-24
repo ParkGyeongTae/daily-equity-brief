@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Daily Equity Brief">
+  <rect width="64" height="64" rx="14" fill="#3451b2"/>
+  <g fill="#ffffff" opacity=".72">
+    <rect x="10" y="38" width="12" height="16" rx="3"/>
+    <rect x="26" y="28" width="12" height="26" rx="3"/>
+  </g>
+  <rect x="42" y="14" width="12" height="40" rx="3" fill="#42d392"/>
+</svg>
