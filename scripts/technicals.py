@@ -11,10 +11,20 @@
     python3 scripts/technicals.py "$SCRATCH/NVDA-1d.json" --emit table     # 지표 표만
     python3 scripts/technicals.py "$SCRATCH/NVDA-1d.json" --emit levels    # 지지/저항 표만
     python3 scripts/technicals.py "$SCRATCH/NVDA-1d.json" --emit facts     # 방법론 4줄
-    python3 scripts/technicals.py "$SCRATCH/005930-1wk.json" --interval-preset weekly
+    python3 scripts/technicals.py "$SCRATCH/005930-1wk.json" --interval-preset weekly \
+        --drop-unconfirmed
 
 `--emit table|levels|facts` 출력은 **손대지 말고 그대로** 보고서에 붙여넣는다. 값을 손으로
 고치면 원자료와 어긋나고, 그 어긋남은 나중에 찾을 수 없다.
+
+미확정 봉
+    마지막 봉이 아직 확정되지 않았으면 경고를 찍는다. `--drop-unconfirmed`를 주면 그 봉을
+    **계산에서 제외하고 제외 사실을 `--emit facts`에 남긴다.** 주봉·월봉은 장이 닫혀 있어도
+    진행 중인 주·달의 봉이 미확정이므로 이 옵션을 기본으로 쓴다.
+    **원자료 JSON을 편집해 봉을 잘라내지 않는다** — 자르는 판단은 이 스크립트가 하고,
+    그 판단이 재현 가능한 기록으로 남아야 한다.
+    판정 기준: 일봉은 거래소 정규장 구간(`meta.currentTradingPeriod.regular`),
+    주봉·월봉은 봉이 속한 기간이 끝났는지(직전 봉과 같은 기간이면 중복 봉으로 본다).
 
 지표 정의 (파라미터는 AGENTS.md가 고정한 값이다 — 종목마다 바꾸지 않는다)
     SMA          단순이동평균 20 / 60 / 120 / 200
@@ -25,6 +35,7 @@
     52주 위치     최근 365일 고·저 대비 (현재가−저)÷(고−저)
     기간 수익률   1M/3M/6M/12M — 달력 기준 30/90/180/365일 **이전 날짜 이하의 마지막 봉** 대비
     거래량 배수   마지막 봉 거래량 ÷ 직전 20봉(마지막 봉 제외) 평균
+    평균 거래대금  최근 20봉(마지막 봉 포함)의 종가 × 거래량 단순평균. 점수표 ③유동성의 근거다.
 
 지지/저항
     스윙 포인트: 고가/저가가 전후 w봉(총 2w+1봉) 내 최고/최저와 같으면 스윙 고점/저점.
@@ -44,8 +55,9 @@ import argparse
 import json
 import math
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 KST = timezone(timedelta(hours=9))
 
@@ -78,11 +90,15 @@ def load(path: Path, price_field: str) -> dict:
     if price_field == "adjclose" and not adj:
         sys.exit("[실패] adjclose가 없다 — --price-field close로 계산하거나 원자료를 다시 받는다.")
 
+    ex_tz = exchange_tz(meta)
+
     bars = []
     for i, t in enumerate(ts):
         row = {
             "t": t,
-            "date": datetime.fromtimestamp(t, timezone.utc).astimezone(KST).strftime("%Y-%m-%d"),
+            # 거래일은 거래소의 날짜다(fetch_ohlcv.py와 같은 기준). 정규 봉은 KST 환산과 같지만,
+            # Yahoo가 덧붙이는 진행 중 봉은 타임스탬프가 장중 시각이라 KST로는 하루 뒤로 밀린다.
+            "date": datetime.fromtimestamp(t, timezone.utc).astimezone(ex_tz).strftime("%Y-%m-%d"),
             "open": _at(q.get("open"), i),
             "high": _at(q.get("high"), i),
             "low": _at(q.get("low"), i),
@@ -103,13 +119,74 @@ def load(path: Path, price_field: str) -> dict:
 
     if len(bars) < 30:
         sys.exit(f"[실패] 유효 봉이 {len(bars)}개뿐이다 — 표본 부족이므로 지표를 만들지 않는다.")
-    return {"meta": meta, "bars": bars}
+    return {"meta": meta, "bars": bars, "ex_tz": ex_tz}
 
 
 def _at(seq, i):
     if not seq or i >= len(seq):
         return None
     return seq[i]
+
+
+def exchange_tz(meta: dict):
+    """거래소 시간대. tzdata에 없는 이름이면 UTC로 떨어뜨린다(fetch_ohlcv.py와 같은 처리)."""
+    try:
+        return ZoneInfo(meta.get("exchangeTimezoneName") or "UTC")
+    except Exception:
+        return timezone.utc
+
+
+# ------------------------------------------------------------ 미확정 봉 판정
+
+
+def _period(date_str: str, preset_key: str):
+    """봉이 속한 기간의 키 — 일봉은 날짜, 주봉은 ISO 연·주차."""
+    if preset_key != "weekly":
+        return date_str
+    y, w, _ = date.fromisoformat(date_str).isocalendar()
+    return (y, w)
+
+
+def unconfirmed_reason(bars: list[dict], preset_key: str, meta: dict, ex_tz, now_dt: datetime) -> str | None:
+    """마지막 봉이 아직 확정되지 않았으면 사유를, 확정이면 None을 돌려준다.
+
+    주봉·월봉은 **장이 닫혀 있어도** 진행 중인 주·달의 봉이 미확정이므로 기간으로 판정한다.
+    일봉은 거래소 정규장 구간으로 판정한다 — 날짜만 보면 장이 끝난 뒤의 확정 봉을
+    미확정으로 오판한다(fetch_ohlcv.py와 같은 기준).
+    """
+    today = datetime.now(ex_tz).strftime("%Y-%m-%d")
+
+    if preset_key == "weekly":
+        last = _period(bars[-1]["date"], preset_key)
+        if len(bars) >= 2 and last == _period(bars[-2]["date"], preset_key):
+            return "직전 봉과 같은 주를 담은 중복 봉"
+        if last == _period(today, preset_key):
+            return "이번 주 진행 중인 봉"
+        return None
+
+    period = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
+    if {"start", "end"} <= period.keys():
+        in_session = period["start"] <= now_dt.timestamp() < period["end"]
+        return "오늘 장중 봉" if in_session and bars[-1]["t"] >= period["start"] else None
+    if bars[-1]["date"] == today:
+        return "거래소 현지 오늘 날짜의 봉 (응답에 정규장 시간이 없어 날짜로 판정했다)"
+    return None
+
+
+def drop_unconfirmed(data: dict, preset_key: str, now_dt: datetime) -> list[str]:
+    """미확정 봉을 뒤에서부터 제외하고, 제외 사유를 순서대로 돌려준다.
+
+    주봉은 '중복 봉 + 진행 중인 주'가 겹쳐 두 개가 미확정일 수 있어 반복한다.
+    3개를 넘으면 판정이 잘못된 것으로 보고 멈춘다 — 원자료를 조용히 갉아먹지 않는다.
+    """
+    dropped: list[str] = []
+    while len(dropped) < 3 and len(data["bars"]) > 30:
+        reason = unconfirmed_reason(data["bars"], preset_key, data["meta"], data["ex_tz"], now_dt)
+        if reason is None:
+            break
+        gone = data["bars"].pop()
+        dropped.append(f"{gone['date']} ({reason})")
+    return dropped
 
 
 # ---------------------------------------------------------------- 지표
@@ -232,6 +309,21 @@ def pct(x: float | None, digits: int = 1) -> str:
     return "—" if x is None else f"{x:+.{digits}f}%"
 
 
+def make_turnover_fmt(currency: str | None):
+    """거래대금은 자리수가 커서 통화별 관용 단위로 줄인다 — 원화는 억, 나머지는 백만."""
+    cur = (currency or "").upper()
+    sym = {"USD": "$", "EUR": "€", "JPY": "¥"}.get(cur, "")
+
+    def fmt(x: float | None) -> str:
+        if x is None:
+            return "—"
+        if cur == "KRW":
+            return f"{x / 1e8:,.0f}억원"
+        return f"{sym}{x / 1e6:,.1f}M"
+
+    return fmt
+
+
 # ---------------------------------------------------------------- 계산 본체
 
 
@@ -269,6 +361,10 @@ def compute(data: dict, preset: dict, args) -> dict:
         base = sum(vols[-21:-1]) / 20
         vol_ratio = last["volume"] / base if base else None
 
+    # 20봉 평균 거래대금 — 점수표 ③유동성의 근거. 마지막 봉을 포함한 최근 20봉이다.
+    turnovers = [b["close"] * b["volume"] for b in bars[-20:] if b["volume"] is not None]
+    turnover20 = sum(turnovers) / len(turnovers) if len(turnovers) == 20 else None
+
     rets = {}
     for label, days in (("1M", 30), ("3M", 90), ("6M", 180), ("12M", 365)):
         ref = lookback_close(bars, days)
@@ -295,6 +391,7 @@ def compute(data: dict, preset: dict, args) -> dict:
         "pos52": (price - lo52) / (hi52 - lo52) * 100 if hi52 > lo52 else None,
         "returns": rets,
         "vol_ratio": vol_ratio,
+        "turnover20": turnover20,
         "resistances": res,
         "supports": sup,
         "swing_counts": (len(sh), len(sl)),
@@ -304,7 +401,7 @@ def compute(data: dict, preset: dict, args) -> dict:
 # ---------------------------------------------------------------- emit
 
 
-def emit_table(c: dict, fmt, preset: dict) -> str:
+def emit_table(c: dict, fmt, preset: dict, tfmt) -> str:
     p = c["price"]
     mu = preset["ma_unit"]
     rows = []
@@ -355,13 +452,16 @@ def emit_table(c: dict, fmt, preset: dict) -> str:
         + [
             f"| 거래량 배수 | {c['vol_ratio']:.2f}배 | 직전 20봉 평균 대비 |"
             if c["vol_ratio"] is not None
-            else "| 거래량 배수 | — | 표본 부족 |"
+            else "| 거래량 배수 | — | 표본 부족 |",
+            f"| 20봉 평균 거래대금 | {tfmt(c['turnover20'])} | 종가 × 거래량의 최근 20봉 평균 |"
+            if c["turnover20"] is not None
+            else "| 20봉 평균 거래대금 | — | 표본 부족 |",
         ]
     )
     return f"기준 종가일: {c['date']} · 현재가 {fmt(c['price'])}\n\n{body}"
 
 
-def emit_levels(c: dict, fmt, far: float) -> str:
+def emit_levels(c: dict, fmt, far: float, dropped: list[str] | None = None) -> str:
     price = c["price"]
 
     def row(name: str, cl: dict) -> str:
@@ -379,6 +479,11 @@ def emit_levels(c: dict, fmt, far: float) -> str:
     lines.append(f"| 참고선 | {fmt(c['hi52'])} / {fmt(c['lo52'])} | — | 52주 최고 / 최저 |")
 
     notes = []
+    if dropped:
+        notes.append(
+            f"미확정 봉 {len(dropped)}개를 제외했으므로 이 표의 현재가({c['date']})는 **마지막 확정 봉 종가**다. "
+            "보고서의 기준 종가일은 일봉 표를 따르고, 이 표는 레벨 값만 가져다 쓴다."
+        )
     if not res or not sup:
         notes.append("유효 클러스터가 한쪽에만 잡혔다 — 없는 쪽은 레벨을 지어내지 말고 그대로 비운다.")
     for label, group in (("저항", res), ("지지", sup)):
@@ -407,13 +512,20 @@ def _between(c: dict) -> str:
     return "유효 클러스터 없음"
 
 
-def emit_facts(c: dict, preset: dict, args, src: Path) -> str:
+def emit_facts(c: dict, preset: dict, args, src: Path, dropped: list[str]) -> str:
     bars, win = c["bars"], c["window_bars"]
     meta = c["meta"]
     unit = preset["unit"]
     adj = "수정주가(분할·배당 반영, adjclose 기준)" if args.price_field == "adjclose" else "분할 반영·배당 미반영(close 기준)"
     now = datetime.now(KST).strftime("%Y-%m-%d")
     sh, sl = c["swing_counts"]
+    flags = " --drop-unconfirmed" if args.drop_unconfirmed else ""
+    drop_line = (
+        [f"- **제외한 미확정 봉**: {', '.join(dropped)} — `--drop-unconfirmed`가 계산에서 뺐다. "
+         "원자료 JSON은 손대지 않았다."]
+        if dropped
+        else []
+    )
     return "\n".join(
         [
             f"- **데이터**: Yahoo Finance {meta.get('symbol')} OHLCV, {len(bars)}봉, "
@@ -424,7 +536,10 @@ def emit_facts(c: dict, preset: dict, args, src: Path) -> str:
             f"- **클러스터링**: 스윙 포인트를 가격 오름차순으로 정렬한 뒤, 기존 클러스터 중심과 ±{args.tol * 100:g}% "
             f"이내면 합산하고 중심을 재계산. 터치 {args.min_touches}회 미만 클러스터는 제외.",
             f"- **생성**: `python3 scripts/technicals.py {src.name} --interval-preset {args.interval_preset} "
-            f"--window {args.window} --tol {args.tol} --price-field {args.price_field}`",
+            f"--window {args.window} --tol {args.tol} --price-field {args.price_field}{flags}`",
+        ]
+        + drop_line
+        + [
             "- **한계**: 후행 지표이며 특정 가격의 지지·저항 작동을 보장하지 않는다. 거래량 프로파일·추세선은 포함하지 "
             "않은 단순 모델이고, 창·허용오차를 바꾸면 레벨과 터치 횟수가 달라진다(최적화된 값이 아니다).",
         ]
@@ -444,6 +559,8 @@ def main() -> None:
     ap.add_argument("--far-pct", type=float, default=0.25,
                     help="현재가에서 이 비율을 넘게 떨어진 레벨은 원거리로 표시 (기본 0.25)")
     ap.add_argument("--price-field", choices=["close", "adjclose"], default="close")
+    ap.add_argument("--drop-unconfirmed", action="store_true",
+                    help="미확정 봉을 계산에서 제외하고 제외 사실을 facts에 남긴다 (주봉·월봉 권장)")
     ap.add_argument("--emit", choices=["all", "table", "levels", "facts", "json"], default="all")
     args = ap.parse_args()
 
@@ -454,15 +571,25 @@ def main() -> None:
         args.tol = preset["tol"]
 
     data = load(args.path, args.price_field)
+    now_dt = datetime.now(timezone.utc)
+
+    dropped: list[str] = []
+    if args.drop_unconfirmed:
+        dropped = drop_unconfirmed(data, args.interval_preset, now_dt)
+        for d in dropped:
+            print(f"[제외] 미확정 봉을 계산에서 뺐다 — {d}", file=sys.stderr)
+    else:
+        reason = unconfirmed_reason(data["bars"], args.interval_preset, data["meta"], data["ex_tz"], now_dt)
+        if reason is not None:
+            print(
+                f"[주의] 마지막 봉({data['bars'][-1]['date']})이 미확정이다 ({reason}) — "
+                "보고서 기준일로 쓰지 않는다. `--drop-unconfirmed`로 제외하고 계산한다.",
+                file=sys.stderr,
+            )
+
     c = compute(data, preset, args)
     fmt = make_fmt(data["meta"].get("currency"))
-
-    if c["date"] == datetime.now(KST).strftime("%Y-%m-%d"):
-        print(
-            f"[주의] 마지막 봉({c['date']})이 오늘이다 — 장중이면 종가·거래량이 미확정이므로 "
-            "보고서 기준일로 쓰지 않는다. 직전 거래일 확정 종가로 다시 받는다.",
-            file=sys.stderr,
-        )
+    tfmt = make_turnover_fmt(data["meta"].get("currency"))
 
     if args.emit == "json":
         out = {k: v for k, v in c.items() if k not in ("bars", "window_bars", "meta")}
@@ -472,15 +599,15 @@ def main() -> None:
         return
 
     if args.emit in ("all", "table"):
-        print(emit_table(c, fmt, preset))
+        print(emit_table(c, fmt, preset, tfmt))
     if args.emit == "all":
         print()
     if args.emit in ("all", "levels"):
-        print(emit_levels(c, fmt, args.far_pct))
+        print(emit_levels(c, fmt, args.far_pct, dropped))
     if args.emit == "all":
         print()
     if args.emit in ("all", "facts"):
-        print(emit_facts(c, preset, args, args.path))
+        print(emit_facts(c, preset, args, args.path, dropped))
 
 
 if __name__ == "__main__":

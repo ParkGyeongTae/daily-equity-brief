@@ -334,6 +334,10 @@ def main() -> int:
             print(f"✗ {path} — 파일이 없다")
             failed = True
             continue
+        # briefs/*.md 로 부르면 목록 페이지까지 잡힌다. 사이트 파서(.vitepress/briefs.mjs)도
+        # index.md 를 브리프로 보지 않으므로 여기서도 조용히 넘긴다.
+        if path.name == "index.md":
+            continue
         rep = validate(path)
         for line, msg in sorted(rep.errors):
             print(f"✗ {path}:{line or '-'} {msg}")
