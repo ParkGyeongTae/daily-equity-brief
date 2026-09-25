@@ -81,6 +81,9 @@ MONEY_RE = re.compile(r"[₩$]\s?[\d,]+(?:\.\d+)?")
 # ③ 감사 층 — 제목은 남기고 본문만 접는다.
 FOLDED = ("출처", "방법론")
 
+# 1절에서 접어야 하는 절차 기록 — 회사 분석이 아니라 에이전트의 작업 기록이다.
+PROCESS_NOTES = ("제외 목록", "시장 판정", "후보 점수표")
+
 # 2절 소절 — 분석 전에 배경을 준다 (AGENTS.md "분석 전에 배경을 먼저 준다").
 BACKGROUND = ("이 산업은 어떻게 돌아가는가", "이 회사는 그 안에서 무엇을 하는가")
 
@@ -321,6 +324,16 @@ def check_fold(rep: Report, lines: list[str], sections: list[dict]) -> None:
     rows = [i for i, _ in table_rows(sec)]
     if rows and not all(i in inside for i in rows):
         rep.err(sec["line"], "1절 후보 점수표가 접히지 않았다 — 감사용이므로 `<details>`로 감싼다")
+
+    # 절차 기록은 회사에 대한 분석이 아니다. 지우지 말고 접는다.
+    for i, t in sec["body"]:
+        if i in inside:
+            continue
+        for kw in PROCESS_NOTES:
+            if kw in t:
+                rep.err(i, f"1절 본문에 '{kw}'이 펼쳐져 있다 — 선정 과정은 `<details>`로 접는다"
+                           " (지우지 않는다 — 무인 실행이 절차를 지켰다는 기록이다)")
+                break
 
 
 def check_background(rep: Report, sections: list[dict]) -> None:
