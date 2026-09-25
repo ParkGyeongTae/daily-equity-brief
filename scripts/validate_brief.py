@@ -36,7 +36,7 @@ TAGS = ("[공시]", "[기술]", "[이벤트]")
 
 # 절 번호 → 제목 일부. 템플릿(AGENTS.md "보고서 템플릿")과 같은 순서다.
 NUMBERED = {
-    0: "스냅샷", 1: "왜 지금 이 종목인가", 2: "사업 구조", 3: "연혁", 4: "핵심 지표",
+    0: "스냅샷", 1: "왜 지금 이 종목인가", 2: "산업과 사업 구조", 3: "연혁", 4: "핵심 지표",
     5: "재무 해석", 6: "밸류에이션", 7: "기술적 위치", 8: "논점", 9: "매매 계획",
     10: "확인해야 할 것",
 }
@@ -80,6 +80,9 @@ LEAD_MAX = 1000
 MONEY_RE = re.compile(r"[₩$]\s?[\d,]+(?:\.\d+)?")
 # ③ 감사 층 — 제목은 남기고 본문만 접는다.
 FOLDED = ("출처", "방법론")
+
+# 2절 소절 — 분석 전에 배경을 준다 (AGENTS.md "분석 전에 배경을 먼저 준다").
+BACKGROUND = ("이 산업은 어떻게 돌아가는가", "이 회사는 그 안에서 무엇을 하는가")
 
 
 class Report:
@@ -320,6 +323,32 @@ def check_fold(rep: Report, lines: list[str], sections: list[dict]) -> None:
         rep.err(sec["line"], "1절 후보 점수표가 접히지 않았다 — 감사용이므로 `<details>`로 감싼다")
 
 
+def check_background(rep: Report, sections: list[dict]) -> None:
+    """2절은 산업 → 회사 순서다. 부문별 매출 표부터 들이대지 않는다."""
+    sec = section_by_number(sections, 2)
+    if sec is None:
+        return
+    subs = [(i, t.strip()[4:].strip()) for i, t in sec["body"] if t.strip().startswith("### ")]
+    names = [n for _, n in subs]
+    for want in BACKGROUND:
+        if not any(want in n for n in names):
+            rep.err(sec["line"], f"2절에 `### {want}` 소절이 없다 — 배경을 분석보다 먼저 준다")
+    if len(names) >= 2 and BACKGROUND[1] in names[0] and BACKGROUND[0] in names[1]:
+        rep.err(subs[0][0], "2절 소절 순서가 뒤집혔다 — 산업이 회사보다 먼저 온다")
+
+    # 산업 소절은 공시에서 온다. 어느 문서인지 적혀 있어야 한다.
+    start = next((i for i, n in subs if BACKGROUND[0] in n), None)
+    if start is None:
+        return
+    end = next((i for i, n in subs if BACKGROUND[1] in n), None)
+    body = [t for i, t in sec["body"] if i > start and (end is None or i < end)]
+    text = "\n".join(body)
+    if not re.search(r"사업보고서|반기보고서|분기보고서|10-K|10-Q|20-F|Item 1", text):
+        rep.err(start, "산업 소절에 출처 문서가 없다 — 사업보고서 II장 / 10-K Item 1 등 어느 항목인지 적는다")
+    if "점유율" in text and "회사 주장" not in text and "확인 불가" not in text:
+        rep.warn(start, "점유율을 적었는데 `(회사 주장, <문서>)` 표기가 없다 — 대개 회사 자신의 집계다")
+
+
 def check_glossary(rep: Report, lines: list[str], sections: list[dict]) -> None:
     """처음 나온 전문 용어를 풀었는가 (AGENTS.md "읽는 사람을 전제한다").
 
@@ -503,6 +532,7 @@ def validate(path: Path) -> Report:
     check_prose(rep, lines)
     check_glossary(rep, lines, sections)
     check_lead(rep, lines, sections)
+    check_background(rep, sections)
     check_fold(rep, lines, sections)
     check_plan(rep, sections)
     check_selection(rep, sections)
