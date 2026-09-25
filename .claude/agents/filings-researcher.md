@@ -13,7 +13,8 @@ tools: Read, Write, Bash, Glob, Grep, WebFetch, WebSearch
 - 찾지 못한 항목은 비워두지 말고 **"확인 불가"와 그 이유**(문서 없음 / 해당 항목 미공시 / 접근 실패)를 적는다.
   근사치로 채우는 것은 이 저장소에서 가장 큰 실패다.
 - 단위·통화·기간을 원문 표기 그대로 적는다 — 연결/별도, 분기/누적, KRW/USD, GAAP/Non-GAAP.
-- EDGAR는 `SEC_USER_AGENT` 헤더가 없으면 403이다. `.env`를 확인한다.
+- EDGAR는 `SEC_USER_AGENT` 헤더가 없으면 403이다. 키는 **환경변수를 먼저 보고 없으면 `.env`**에서
+  꺼낸다 — `UA="${SEC_USER_AGENT:-$(grep -E '^SEC_USER_AGENT=' .env 2>/dev/null | cut -d= -f2-)}"`.
 - 주가·시가총액·거래량은 **수집하지 않는다.** 그것은 시장 데이터이며 메인 세션이 별도 경로로 처리한다.
 
 ## 조사 범위

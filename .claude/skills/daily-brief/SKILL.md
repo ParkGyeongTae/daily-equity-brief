@@ -78,12 +78,14 @@ ls briefs/*.md 2>/dev/null \
 그래서 **먼저 공시 접수 목록에서 사건을 찾고, 그것으로 3~5개가 안 차면 뉴스 검색으로 보강한다.**
 공시 접수 목록에서 출발하면 점수표 ②검증 가능성이 이미 확보된 상태로 후보가 만들어진다.
 
-`.env`는 **셸로 `source` 할 수 없다** — `SEC_USER_AGENT` 값에 공백이 있어 `set -a; . ./.env`는
-"command not found"로 죽는다. 아래처럼 필요한 값만 꺼낸다.
+키는 **환경변수를 먼저 보고, 없으면 `.env`에서 꺼낸다.** 무인 실행에는 `.env`가 없고 키가 환경변수로
+주입되며, 사람이 쓰는 로컬에는 `.env`만 있다 — 아래 형태면 양쪽에서 같은 명령이 돈다
+(`fetch_macro.py`가 쓰는 우선순위와 같다). `.env`는 `SEC_USER_AGENT` 값에 공백이 있어
+**셸로 `source` 할 수 없으므로**(`set -a; . ./.env`는 "command not found"로 죽는다) 필요한 값만 꺼낸다.
 
 ```bash
 # 미국 — EDGAR 전문검색. 실적 발표(8-K Item 2.02) 최근 3일. UA 없으면 403이다.
-UA=$(grep -E '^SEC_USER_AGENT=' .env | cut -d= -f2-)
+UA="${SEC_USER_AGENT:-$(grep -E '^SEC_USER_AGENT=' .env 2>/dev/null | cut -d= -f2-)}"
 FROM=$(TZ=Asia/Seoul date -v-2d +%F 2>/dev/null || TZ=Asia/Seoul date -d '2 days ago' +%F)
 curl -s -H "User-Agent: $UA" \
   "https://efts.sec.gov/LATEST/search-index?q=%22Item%202.02%22&forms=8-K&startdt=$FROM&enddt=$(TZ=Asia/Seoul date +%F)" \
@@ -96,7 +98,7 @@ for h in d["hits"]["hits"]:
 
 ```bash
 # 한국 — DART 접수 목록. pblntf_ty=B 주요사항보고, I 거래소 수시공시. corp_cls Y=유가증권 K=코스닥.
-K=$(grep -E '^DART_API_KEY=' .env | cut -d= -f2-)
+K="${DART_API_KEY:-$(grep -E '^DART_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}"
 BGN=$(TZ=Asia/Seoul date -v-2d +%Y%m%d 2>/dev/null || TZ=Asia/Seoul date -d '2 days ago' +%Y%m%d)
 curl -s "https://opendart.fss.or.kr/api/list.json?crtfc_key=$K&bgn_de=$BGN&end_de=$(TZ=Asia/Seoul date +%Y%m%d)&pblntf_ty=B&corp_cls=Y&page_count=30" \
   | python3 -c 'import json,sys
@@ -109,8 +111,10 @@ for it in (d.get("list") or []): print(it["rcept_dt"], "|", it["corp_name"], "|"
   허용되지만 조용히 바꾸는 것은 허용되지 않는다.
 - EDGAR 전문검색은 색인이 하루가량 늦을 수 있다. 접수 목록이 비면 뉴스 검색으로 넘어가고,
   그 사실을 기록한다.
-- **키가 없으면 그 경로를 포기하고 뉴스로 간다.** `DART_API_KEY`나 `SEC_USER_AGENT`가 환경에 없는
-  실행 환경이 있다(무인 실행은 저장소의 `.env`를 갖고 있지 않다). 그때는 **시장을 바꾸지 않고**
+- **키가 정말 없을 때만 그 경로를 포기하고 뉴스로 간다.** 위 형태는 환경변수와 `.env` 양쪽을 보므로,
+  `$UA`·`$K`가 비었다면 **어느 쪽에도 없는 것이다**(`[ -z "$K" ] && echo "DART_API_KEY 없음"`으로
+  확인한다). 인증 실패를 키 부재로 넘겨짚지 않는다 — 접수 목록은 이 저장소의 기본 발굴 경로다.
+  키가 실제로 없으면 **시장을 바꾸지 않고**
   뉴스 검색으로 후보를 만들고, **키가 없어 접수 목록을 못 봤다는 사실을 `## 방법론 · 재현`에 적는다.**
   다만 ②검증 가능성은 여전히 공시 원문으로 확인해야 한다 — EDGAR 문서 본문은 UA 없이도
   받아지는 경우가 있으니 거기서 막히면 그 사실도 함께 적는다.
@@ -194,8 +198,9 @@ python3 scripts/technicals.py "$SCRATCH/<후보티커>-1d.json" --drop-unconfirm
 - 공시 원문 URL을 `## 출처`에 전부 남긴다. 링크 없는 주장은 쓰지 않는다.
 - IR 페이지의 실적 발표 자료는 보조 자료다. 공시본이 있으면 공시본을 우선한다.
 - 종목 선정용 뉴스는 출처에 포함하되 "선정 계기"로 명확히 구분한다.
-- API 키는 `.env`에 있다(`.env.template` 참고). EDGAR는 `SEC_USER_AGENT` 헤더가 없으면 403이다.
-  `.env`를 `source`하지 말고 2단계처럼 `grep … | cut -d= -f2-`로 필요한 값만 꺼낸다(값에 공백이 있다).
+- API 키는 **환경변수 우선, 없으면 `.env`**다(`.env.template` 참고). EDGAR는 `SEC_USER_AGENT`
+  헤더가 없으면 403이다. `.env`를 `source`하지 말고 2단계의 `"${VAR:-$(grep … | cut -d= -f2-)}"`
+  형태를 쓴다(값에 공백이 있다).
 
 ### 시장 데이터 (타이밍 근거)
 
