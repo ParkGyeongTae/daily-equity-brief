@@ -58,6 +58,20 @@ BANNED = [
 # 템플릿을 채우지 않고 남긴 흔적
 PLACEHOLDERS = [r"<종목명>", r"<코드/티커>", r"<조건>", r"<있으면>", r"\bTBD\b", r"\bTODO\b"]
 
+# 한 줄 요약 첫 줄의 상한 (AGENTS.md "읽는 사람을 전제한다").
+SUMMARY_MAX = 60
+# 0절 "현재 스탠스"가 고르는 값. 요약 둘째 줄도 이 중 하나로 시작한다.
+STANCES = ("진입 대기", "조건 충족", "관심", "관망", "보류")
+
+# 처음 나올 때 괄호로 뜻을 풀어야 하는 용어.
+# **목록에 없다고 안 풀어도 된다는 뜻이 아니다** — 브리프마다 반복되는 것만 기계가 잡는다.
+GLOSS_TERMS = [
+    "적응증", "현금창출단위", "부문간 제거", "영업권", "순차입금", "무상증자", "물적분할",
+    "공정공시", "미확정 봉", "TTM", "FCF",
+]
+# 7절 지표 표에서 "비고" 칸을 비워둘 수 없는 약어.
+INDICATOR_ROWS = re.compile(r"^(SMA|RSI|MACD|ATR|볼린저|%B)")
+
 
 class Report:
     def __init__(self, path: Path):
@@ -135,8 +149,42 @@ def check_head(rep: Report, lines: list[str], file_date: str, file_code: str) ->
     q = QUOTE_RE.match(second)
     if not q:
         rep.err(j, "둘째 줄이 `> 한 줄 요약: ...` 형식이 아니다 (사이트 목록이 이 줄을 파싱한다)")
-    elif len(q.group(1).strip()) < 10:
+        return
+
+    head = q.group(1).strip()
+    if len(head) < 10:
         rep.warn(j, "한 줄 요약이 지나치게 짧다")
+    if len(head) > SUMMARY_MAX:
+        rep.err(
+            j,
+            f"한 줄 요약 첫 줄이 {len(head)}자다 ({SUMMARY_MAX}자 이내) — "
+            "결론 한 문장만 남기고 조건은 9절로 내린다",
+        )
+
+    # 셋째 줄: 스탠스와 그 가격. 사이트 목록은 두 줄을 이어 붙인다.
+    if len(meaningful) < 3 or not meaningful[2][1].lstrip().startswith(">"):
+        rep.err(j, "한 줄 요약 둘째 줄이 없다 — `> <스탠스> — <가격 조건>` 한 줄을 인용문에 잇는다")
+        return
+    k, third = meaningful[2]
+    stance = third.lstrip().lstrip(">").strip()
+    if not any(stance.startswith(w) for w in STANCES):
+        rep.err(k, f"요약 둘째 줄이 스탠스로 시작하지 않는다 — {' / '.join(STANCES)} 중 하나")
+        return
+
+    # 0절 "현재 스탠스"와 어긋나면 둘 중 하나가 낡은 것이다.
+    head_w = next((w for w in STANCES if stance.startswith(w)), None)
+    for _, t in lines_with_stance(lines):
+        cells = [c.strip() for c in t.strip().strip("|").split("|")]
+        if len(cells) >= 2:
+            snap_w = next((w for w in STANCES if cells[1].startswith(w)), None)
+            if snap_w and head_w and snap_w != head_w:
+                rep.err(k, f"요약 둘째 줄의 스탠스({head_w})가 0절 '현재 스탠스'({snap_w})와 다르다")
+        break
+
+
+def lines_with_stance(lines: list[str]) -> list[tuple[int, str]]:
+    return [(i, t) for i, t in enumerate(lines, start=1)
+            if t.lstrip().startswith("|") and "현재 스탠스" in t]
 
 
 def check_sections(rep: Report, sections: list[dict]) -> None:
@@ -192,6 +240,33 @@ def check_prose(rep: Report, lines: list[str]) -> None:
     text = "\n".join(lines)
     if "투자 권유가 아닙니다" not in text:
         rep.err(0, "면책 문구가 없다 — 템플릿 마지막 줄")
+
+
+def check_glossary(rep: Report, lines: list[str], sections: list[dict]) -> None:
+    """처음 나온 전문 용어를 풀었는가 (AGENTS.md "읽는 사람을 전제한다").
+
+    기계가 볼 수 있는 것은 "괄호가 붙었는가"뿐이다. 괄호 안의 설명이 실제로 도움이 되는지는
+    `brief-verifier`가 본다. 그래서 전부 경고다 — 커밋을 막지 않고 눈에만 띄게 한다.
+    """
+    for term in GLOSS_TERMS:
+        for i, raw in enumerate(lines, start=1):
+            if term not in raw:
+                continue
+            # 첫 등장 줄에서 용어 바로 뒤가 여는 괄호여야 한다.
+            after = raw.split(term, 1)[1].lstrip()
+            if not after.startswith(("(", "（")):
+                rep.warn(i, f"'{term}' — 처음 나올 때 뜻 풀이가 없다. 괄호로 한 번 푼다")
+            break  # 첫 등장만 본다
+
+    sec = section_by_number(sections, 7)
+    if sec is None:
+        return
+    for i, row in table_rows(sec):
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        if len(cells) < 3 or not INDICATOR_ROWS.match(cells[0]):
+            continue
+        if not cells[-1]:
+            rep.warn(i, f"7절 '{cells[0]}' 행의 비고가 비었다 — 무엇을 잰 숫자인지 한 구절로 적는다")
 
 
 def table_rows(section: dict) -> list[tuple[int, str]]:
@@ -348,6 +423,7 @@ def validate(path: Path) -> Report:
     check_head(rep, lines, file_date, file_code)
     check_sections(rep, sections)
     check_prose(rep, lines)
+    check_glossary(rep, lines, sections)
     check_plan(rep, sections)
     check_selection(rep, sections)
     check_sources(rep, sections, file_date)

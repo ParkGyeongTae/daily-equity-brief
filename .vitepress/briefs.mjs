@@ -1,6 +1,6 @@
 // briefs/ 디렉터리를 읽어 브리프 목록을 만든다.
 // 파일명 규칙(AGENTS.md): briefs/YYYY-MM-DD-<종목코드 또는 티커>.md
-// 제목은 본문 첫 h1에서, 한 줄 요약은 첫 인용문(> ...)에서 뽑는다.
+// 제목은 본문 첫 h1에서, 한 줄 요약은 첫 인용문 블록(> ...) 전체에서 뽑아 " · "로 잇는다.
 // 프런트매터를 요구하지 않으므로 AGENTS.md의 브리프 템플릿을 고칠 필요가 없다.
 
 import fs from 'node:fs'
@@ -28,13 +28,22 @@ export function readBriefs() {
       const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '') // 프런트매터가 있으면 제거
 
       const h1 = /^#\s+(.+)$/m.exec(body)
-      const quote = /^>\s*(?:한 줄 요약\s*[:：]\s*)?(.+)$/m.exec(body)
+      // 한 줄 요약은 두 줄이다(AGENTS.md "읽는 사람을 전제한다") — 결론 한 문장 + 스탠스.
+      // 인용문 블록을 통째로 잡아 줄을 " · "로 이어 붙인다. 한 줄짜리 옛 브리프도 그대로 동작한다.
+      const quote = /^>[^\n]*(?:\n>[^\n]*)*/m.exec(body)
+      const summary = quote
+        ? quote[0]
+            .split('\n')
+            .map((l) => l.replace(/^>\s*/, '').replace(/^한 줄 요약\s*[:：]\s*/, '').trim())
+            .filter(Boolean)
+            .join(' · ')
+        : ''
 
       return {
         date,
         code,
         title: h1 ? h1[1].trim() : `${date} ${code}`,
-        summary: quote ? quote[1].trim() : '',
+        summary,
         link: `/briefs/${file.replace(/\.md$/, '')}`,
       }
     })
