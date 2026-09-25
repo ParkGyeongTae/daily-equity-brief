@@ -3,6 +3,9 @@ title: 브리프
 ---
 
 <script setup>
+// withBase: base('/daily-equity-brief/')는 마크다운 링크에만 자동으로 붙는다.
+// 데이터로 받은 경로를 :href로 바인딩하면 base가 빠져 도메인 루트로 가 404가 난다.
+import { withBase } from 'vitepress'
 import { data as briefs } from './briefs.data.mts'
 </script>
 
@@ -12,7 +15,7 @@ import { data as briefs } from './briefs.data.mts'
 
 <ul v-if="briefs.length" class="brief-list">
   <li v-for="b in briefs" :key="b.link">
-    <a :href="b.link">
+    <a :href="withBase(b.link)">
       <span class="brief-date">{{ b.date }}</span>
       <span class="brief-title">{{ b.title.replace(/\s*—\s*\d{4}-\d{2}-\d{2}\s*$/, '') }}</span>
     </a>
