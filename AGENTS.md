@@ -90,6 +90,7 @@
 | `filings-researcher` (서브에이전트) | DART/EDGAR 원문 수집 — 메인 컨텍스트 밖에서 | `.claude/agents/filings-researcher.md` |
 | `brief-verifier` (서브에이전트) | 완성된 브리프를 새 컨텍스트에서 교차 검증 | `.claude/agents/brief-verifier.md` |
 | 커밋 차단 훅 | 검증 미통과 브리프의 커밋을 막는다 (자동) | `scripts/hooks/block_unverified_commit.sh` |
+| `scripts/check_site_links.mjs` | 사이트 빌드 산출물에서 base 누락 링크를 잡는다 (`docs:build`가 자동 호출) | 스크립트 docstring |
 
 - 스크립트의 사용법·파라미터·한계는 **docstring이 마스터**다. 이 파일에 옮겨 적지 않는다.
 - API 키는 `.env`에 있다(`.env.template` 참고). EDGAR는 `SEC_USER_AGENT` 헤더가 없으면 403이다.
