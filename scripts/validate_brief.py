@@ -72,6 +72,15 @@ GLOSS_TERMS = [
 # 7절 지표 표에서 "비고" 칸을 비워둘 수 없는 약어.
 INDICATOR_ROWS = re.compile(r"^(SMA|RSI|MACD|ATR|볼린저|%B)")
 
+# ① 결론 층 (AGENTS.md "세 층으로 쌓는다"). 0절보다 앞에 오고, 1분에 읽힌다.
+LEAD = "지금 무엇을 하는가"
+LEAD_ROWS = ("산다", "판다", "계획을 버린다")
+LEAD_MAX = 1000
+# 결론 절의 가격은 9절 표에서 가져온 것이어야 한다 — 두 곳에 쓰면 어긋난다.
+MONEY_RE = re.compile(r"[₩$]\s?[\d,]+(?:\.\d+)?")
+# ③ 감사 층 — 제목은 남기고 본문만 접는다.
+FOLDED = ("출처", "방법론")
+
 
 class Report:
     def __init__(self, path: Path):
@@ -209,7 +218,7 @@ def check_sections(rep: Report, sections: list[dict]) -> None:
         elif not re.search(rf"(?<!\d){n}(?!\d)", omitted_line):
             rep.err(0, f"{n}절({name})이 없는데 `## 방법론 · 재현`의 '생략한 절' 줄에 사유가 없다")
 
-    for want in ("출처", "방법론"):
+    for want in ("출처", "방법론"):  # 결론 층은 check_lead 가 본다
         if section_by_name(sections, want) is None:
             rep.err(0, f"`## {want}` 절이 없다")
 
@@ -240,6 +249,75 @@ def check_prose(rep: Report, lines: list[str]) -> None:
     text = "\n".join(lines)
     if "투자 권유가 아닙니다" not in text:
         rep.err(0, "면책 문구가 없다 — 템플릿 마지막 줄")
+
+
+def details_lines(lines: list[str]) -> set[int]:
+    """`<details>` ... `</details>` 안에 있는 줄 번호."""
+    inside, depth = set(), 0
+    for i, t in enumerate(lines, start=1):
+        opened = "<details" in t
+        if opened:
+            depth += 1
+        if depth > 0:
+            inside.add(i)
+        if "</details>" in t:
+            depth = max(0, depth - 1)
+    return inside
+
+
+def check_lead(rep: Report, lines: list[str], sections: list[dict]) -> None:
+    """① 결론 층 — 아침에 이것만 읽고 덮어도 되게."""
+    sec = section_by_name(sections, LEAD)
+    if sec is None:
+        rep.err(0, f"`## {LEAD}` 절이 없다 — h1 다음, 0절 앞에 결론 층을 둔다")
+        return
+    ln = sec["line"]
+
+    snap = section_by_number(sections, 0)
+    first_numbered = min(
+        (s["line"] for s in sections if re.match(r"^\d+\.", s["title"])), default=None
+    )
+    if first_numbered is not None and ln > first_numbered:
+        rep.err(ln, f"`## {LEAD}`가 번호 절보다 뒤에 있다 — 결론이 먼저 온다")
+    _ = snap
+
+    text = body_text(sec)
+    if len(text) > LEAD_MAX:
+        rep.warn(ln, f"결론 절이 {len(text)}자다 (900자 목표) — 못 담은 조건은 9절에 두고 옮겨 적지 않는다")
+
+    rows = table_rows(sec)
+    labels = " ".join(c for _, r in rows for c in r.strip("|").split("|")[:1])
+    for want in LEAD_ROWS:
+        if want not in labels:
+            rep.err(ln, f"결론 절 표에 '{want}' 행이 없다 — 산다 / 판다(손절) / 계획을 버린다 세 줄")
+
+    plan = section_by_number(sections, 9)
+    if plan is None:
+        return
+    plan_money = {m.group(0).replace(" ", "") for m in MONEY_RE.finditer(body_text(plan))}
+    for i, row in rows:
+        for m in MONEY_RE.finditer(row):
+            token = m.group(0).replace(" ", "")
+            if token not in plan_money:
+                rep.err(i, f"결론 절의 {token}이 9절 표에 없다 — 가격은 9절에서 그대로 가져온다")
+
+
+def check_fold(rep: Report, lines: list[str], sections: list[dict]) -> None:
+    """③ 감사 층은 접는다 — 지우지 않고 읽는 경로에서만 뺀다."""
+    for name in FOLDED:
+        sec = section_by_name(sections, name)
+        if sec is None:
+            continue
+        if "<details" not in body_text(sec):
+            rep.err(sec["line"], f"`## {sec['title']}` 본문이 접히지 않았다 — `<details>`로 감싼다(제목은 남긴다)")
+
+    sec = section_by_number(sections, 1)
+    if sec is None:
+        return
+    inside = details_lines(lines)
+    rows = [i for i, _ in table_rows(sec)]
+    if rows and not all(i in inside for i in rows):
+        rep.err(sec["line"], "1절 후보 점수표가 접히지 않았다 — 감사용이므로 `<details>`로 감싼다")
 
 
 def check_glossary(rep: Report, lines: list[str], sections: list[dict]) -> None:
@@ -424,6 +502,8 @@ def validate(path: Path) -> Report:
     check_sections(rep, sections)
     check_prose(rep, lines)
     check_glossary(rep, lines, sections)
+    check_lead(rep, lines, sections)
+    check_fold(rep, lines, sections)
     check_plan(rep, sections)
     check_selection(rep, sections)
     check_sources(rep, sections, file_date)
