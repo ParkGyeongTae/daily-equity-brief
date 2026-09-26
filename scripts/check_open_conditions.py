@@ -330,6 +330,12 @@ def verdict_of(rows: list[dict], window: list[dict]) -> dict:
     e_hit = (entry or {}).get("hit")
     s_hit = (stop or {}).get("hit")
 
+    # 진입 조건을 쓰지 않은 브리프(스탠스 관망·보류)도 정당한 결론이다 — 무효화만 판정한다.
+    if entry is None or entry.get("price") is None:
+        if s_hit:
+            return {"code": "무효화 관찰", "text": f"{s_hit['date']} 가격 무효화 이탈 "
+                                                  "(이 브리프에는 1차 진입 가격 조건이 없다)"}
+        return {"code": "미결", "text": "1차 진입 가격 조건이 없고 가격 무효화도 관찰되지 않았다"}
     if not e_hit and not s_hit:
         return {"code": "미결", "text": "1차 진입도 가격 무효화도 관찰되지 않았다"}
     if s_hit and (not e_hit or s_hit["date"] < e_hit["date"]):

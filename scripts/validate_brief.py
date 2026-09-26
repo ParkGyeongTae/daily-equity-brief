@@ -9,7 +9,7 @@
 일치하는지, 논거가 타당한지, 출처 URL이 실제로 그 숫자를 담고 있는지는 사람과
 `brief-verifier` 서브에이전트의 몫이다. 여기서 보는 것은 **기계가 판정할 수 있는 것뿐**이다
 — 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
-요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 6절 배수 밴드의 기준점, 출처 절의 필수 항목, 기준 종가일 일관성,
+요건(가격·논거 무효화 쌍, R 계산식, 근거 태그, 가격 근거의 편중), 6절 배수 밴드의 기준점, 출처 절의 필수 항목, 기준 종가일 일관성,
 거시를 쓴 경우의 관측일·조회일 표기.
 
 통과(exit 0)는 "이 브리프가 옳다"가 아니라 "형식 때문에 틀릴 일은 없다"는 뜻이다.
@@ -424,11 +424,25 @@ def check_plan(rep: Report, sections: list[dict]) -> None:
     rows = table_rows(sec)
     if not rows:
         rep.err(ln, "9절에 매매 조건 표가 없다")
+    priced = []
     for i, row in rows:
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        head = cells[0] if cells else row
         if not any(tag in row for tag in TAGS):
-            cells = [c.strip() for c in row.strip("|").split("|")]
-            head = cells[0] if cells else row
             rep.err(i, f"9절 '{head}' 행에 근거 태그가 없다 — [공시]/[기술]/[이벤트] 중 하나")
+        if len(cells) >= 3 and MONEY_RE.search(cells[2]):
+            priced.append((i, row, head))
+
+    # 1차 진입가는 스탠스를 정하는 가격이다. 그것이 순수 `[기술]`이고 밸류에이션과 대조되지도
+    # 않으면 2~6절의 공시 작업이 결론에 닿지 않는다 — 공시를 읽지 않고 레벨만 뽑아도 같은 표가
+    # 나온다. 억지 조건을 만들라는 게 아니라 **그 가격이 밴드의 어디인지 한 줄 대라는** 것이다.
+    entry = next(((i, row) for i, row, head in priced if head.startswith("1차 진입")), None)
+    if entry is not None:
+        i, row = entry
+        if not ("[공시]" in row or "[이벤트]" in row) and not ("분위" in text or "밴드" in text):
+            rep.warn(i, "9절 1차 진입가의 근거가 `[기술]`뿐이고 밸류에이션과 대조되지도 않았다 — "
+                        "그 가격이 6절 배수 밴드의 몇 분위인지 한 줄 적거나, 진입 조건을 쓸 수 "
+                        "없다면 스탠스를 `관망`·`보류`로 둔다")
 
 
 def check_selection(rep: Report, sections: list[dict]) -> None:
