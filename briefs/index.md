@@ -13,6 +13,8 @@ import { data as briefs } from './briefs.data.mts'
 
 날짜 역순. 각 브리프의 모든 수치는 1차 공시 원문에서 확인한 것이며, 문서 하단 `출처`에서 원문 링크를 볼 수 있습니다.
 
+각 브리프의 9절 매매 조건이 그 뒤 실제로 관찰됐는지는 [조건 원장](./ledger)에 기록합니다.
+
 <ul v-if="briefs.length" class="brief-list">
   <li v-for="b in briefs" :key="b.link">
     <a :href="withBase(b.link)">

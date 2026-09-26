@@ -32,19 +32,25 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: '브리프', link: '/briefs/' },
+      { text: '조건 원장', link: '/briefs/ledger' },
       { text: '방법론', link: '/AGENTS' },
       { text: '작성 절차', link: '/workflow' },
       { text: 'Claude Code 모범 사례', link: '/claude-code-best-practices' },
     ],
 
     sidebar: {
-      '/briefs/': [{ text: '브리프', items: briefSidebar() }],
+      '/briefs/': [
+        // 원장은 브리프가 아니라 브리프들에 대한 기록이므로 목록 위에 따로 둔다.
+        { text: '기록', items: [{ text: '조건 원장', link: '/briefs/ledger' }] },
+        { text: '브리프', items: briefSidebar() },
+      ],
       '/': [
         {
           text: '이 저장소',
           items: [
             { text: '소개', link: '/' },
             { text: '브리프 목록', link: '/briefs/' },
+            { text: '조건 원장', link: '/briefs/ledger' },
             { text: '방법론 (AGENTS.md)', link: '/AGENTS' },
             { text: '작성 절차 (daily-brief 스킬)', link: '/workflow' },
             { text: 'Claude Code 모범 사례', link: '/claude-code-best-practices' },
