@@ -9,7 +9,7 @@
 일치하는지, 논거가 타당한지, 출처 URL이 실제로 그 숫자를 담고 있는지는 사람과
 `brief-verifier` 서브에이전트의 몫이다. 여기서 보는 것은 **기계가 판정할 수 있는 것뿐**이다
 — 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
-요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 출처 절의 필수 항목, 기준 종가일 일관성,
+요건(가격·논거 무효화 쌍, R 계산식, 근거 태그), 6절 배수 밴드의 기준점, 출처 절의 필수 항목, 기준 종가일 일관성,
 거시를 쓴 경우의 관측일·조회일 표기.
 
 통과(exit 0)는 "이 브리프가 옳다"가 아니라 "형식 때문에 틀릴 일은 없다"는 뜻이다.
@@ -485,6 +485,29 @@ def check_close_date(rep: Report, lines: list[str], sections: list[dict]) -> Non
         rep.err(tech["line"], "7절에 기준 종가일이 없다")
 
 
+def check_valuation(rep: Report, sections: list[dict]) -> None:
+    """6절에 기준점이 있는가.
+
+    배수를 적어도 **무엇과 비교한 값인지**가 없으면 "비싸다/싸다"가 측정이 아니라 주장이 된다.
+    밴드를 못 만드는 경우(적자·분할·상장 직후)가 있으므로 오류가 아니라 경고다 — 대신
+    만들지 못한 사유를 남기게 한다(AGENTS.md "경고는 커밋을 막지 않지만 그냥 넘기지 않는다").
+    """
+    sec = section_by_number(sections, 6)
+    if sec is None:
+        return
+    text = body_text(sec)
+    if not re.search(r"배수|PER|PBR|EV\s*/|수익률", text):
+        return  # 배수를 쓰지 않은 브리프 — 비교할 것이 없다
+    if "분위" in text or "밴드" in text:
+        return
+    method = body_text(section_by_name(sections, "방법론"))
+    if "배수 밴드" in method or "valuation_band" in method:
+        return  # 만들지 못한 사유를 방법론에 남겼다
+    rep.warn(sec["line"],
+             "6절 배수에 기준점이 없다 — 자기 이력 밴드의 분위를 싣거나, "
+             "만들지 못한 사유를 `## 방법론 · 재현`에 한 줄 남긴다 (valuation_band.py)")
+
+
 def check_method(rep: Report, sections: list[dict]) -> None:
     sec = section_by_name(sections, "방법론")
     if sec is None:
@@ -551,6 +574,7 @@ def validate(path: Path) -> Report:
     check_selection(rep, sections)
     check_sources(rep, sections, file_date)
     check_close_date(rep, lines, sections)
+    check_valuation(rep, sections)
     check_method(rep, sections)
     check_macro(rep, lines, sections, file_date)
     return rep
