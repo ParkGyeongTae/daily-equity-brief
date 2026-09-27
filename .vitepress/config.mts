@@ -5,6 +5,10 @@ import { briefSidebar } from './briefs.mjs'
 // 아래 head에서 이 상수를 직접 끼워 쓴다.
 const base = '/daily-equity-brief/'
 
+// sitemap.xml의 절대 URL을 만드는 기준. 프로젝트 페이지라 base까지 포함해야 한다 —
+// VitePress는 페이지 경로를 이 값에 상대 해석해 붙이므로, 끝 슬래시를 빼면 base가 잘린다.
+const hostname = `https://parkgyeongtae.github.io${base}`
+
 export default defineConfig({
   title: 'Daily Equity Brief',
   description: '매일 한 종목씩 쓰는 개인 주식 리서치 브리프 — 선정은 뉴스, 근거는 1차 공시',
@@ -28,6 +32,10 @@ export default defineConfig({
   srcExclude: ['README.md', 'CLAUDE.md'],
   cleanUrls: true,
   lastUpdated: true,
+
+  // 검색엔진용 sitemap. 브리프가 매일 한 건씩 늘어나므로 목록을 손으로 관리하지 않는다.
+  // lastUpdated가 켜져 있어 각 항목의 lastmod는 그 파일의 마지막 커밋 시각으로 채워진다.
+  sitemap: { hostname },
 
   themeConfig: {
     nav: [
