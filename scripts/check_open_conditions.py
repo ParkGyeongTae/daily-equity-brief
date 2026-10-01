@@ -41,6 +41,12 @@
     제외한다 — 조건은 모두 종가 기준이므로 장중 봉으로 판정하면 안 된다.
     기준 종가를 원자료와 대조해 어긋나면 `[주의]`로 찍는다. 티커 해석이 틀렸는지를 여기서 잡는다.
 
+원장(`--emit ledger`)
+    `진행 중`과 `종료` 두 표로 나눈다. 진행 중 표에는 최근 종가와, 관찰되지 않은 가격까지
+    남은 거리(%)를 붙인다. 커밋된 원장(HEAD)에서 ✓였던 칸이 ✓가 아니게 되면 **판정 되돌림**으로
+    원장과 stderr에 적는다 — 관찰된 종가는 지나간 사실이라 되돌아가지 않으므로, 되돌아갔다면
+    원자료가 빠졌거나(종가 공란) 소급 조정(분할)된 것이다. 종가가 공란이라 빠진 날도 따로 적는다.
+
 한계
     - 브리프 작성 후 **주식분할·병합**이 있었다면 Yahoo의 과거 종가가 소급 조정돼 브리프에
       적힌 레벨과 기준이 달라진다. 기준 종가 대조가 어긋나면 그때는 레벨을 다시 계산해야 하고
@@ -56,6 +62,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
@@ -206,6 +213,12 @@ def fetch_bars(ticker: str, rng: str, scratch: Path, refresh: bool) -> dict:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     data = T.load(out, "close")
+    # load()는 종가가 빈 봉을 휴장처럼 조용히 버린다. 거래일인데 공란이면 그날의 판정이
+    # **소리 없이 빠지므로**, 버려진 날짜를 남겨 출력에 찍는다.
+    raw = json.loads(out.read_text(encoding="utf-8"))["chart"]["result"][0].get("timestamp") or []
+    kept = {b["date"] for b in data["bars"]}
+    data["blank"] = sorted({datetime.fromtimestamp(t, timezone.utc).astimezone(data["ex_tz"])
+                            .strftime("%Y-%m-%d") for t in raw} - kept)
     data["dropped"] = T.drop_unconfirmed(data, "daily", datetime.now(timezone.utc))
     data["src"] = out
     data["range"] = rng
@@ -425,6 +438,8 @@ def emit_plain(res: dict) -> str:
         out.append(f"  [제외] 미확정 봉 — {d}")
     for n in res["notes"]:
         out.append(f"  [주의] {n}")
+    for d in blanks_of(res):
+        out.append(f"  [주의] {d} 원자료 종가 공란 — 이 날은 판정에서 빠졌다")
 
     judged = {"충족", "이탈", "미충족", "가격 조건 관찰", "가격 조건 미관찰"}
     for r in [r for r in res["rows"] if r["verdict"] in judged]:
@@ -463,8 +478,104 @@ def emit_plain(res: dict) -> str:
     return "\n".join(out)
 
 
-def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_days: int) -> str:
+# 계획이 끝난 판정. 이 밖의 판정은 아직 진행 중이다(창이 닫힌 것은 따로 본다).
+ENDED = {"진입 없이 무효화", "충족 후 무효화", "일부 정리 후 무효화", "전량 정리 관찰", "무효화 관찰"}
+LEVEL_COLS = ("1차 진입", "가격 무효화", "일부 정리", "전량 정리")
+
+
+def blanks_of(res: dict) -> list[str]:
+    """기준 종가일 이후 추적 창 안에서, 종가가 공란이라 판정에서 빠진 날."""
+    end = res["closed_on"] or "9999-12-31"
+    return [d for d in res["data"].get("blank", []) if res["brief"]["base_date"] < d <= end]
+
+
+def ledger_cells(res: dict, live: bool) -> dict[str, str]:
+    """원장 한 행의 가격 칸. live면 관찰되지 않은 칸에 최근 종가 대비 남은 거리를 붙인다."""
+    fmt, rows = res["fmt"], res["rows"]
+    last = res["window"][-1]["close"] if res["window"] else None
+
+    def dist(price):
+        return f" {(price - last) / last * 100:+.1f}%" if live and last else ""
+
+    def cell(kind):
+        r = next((r for r in rows if r["kind"] == kind), None)
+        if r is None or r["price"] is None:
+            return "—"
+        mark = {"충족": "✓", "이탈": "✓", "가격 조건 관찰": "✓",
+                "미충족": "·", "가격 조건 미관찰": "·", "추적 전": "…"}.get(r["verdict"], "?")
+        if r.get("hit"):
+            return f"{fmt(r['price'])} ✓ {r['hit']['date']}"
+        return f"{fmt(r['price'])} {mark}" + (dist(r["price"]) if mark == "·" else "")
+
+    takes = take_touches(rows, res["window"])
+
+    def take_cell(kind):
+        # 정리는 보유 구간 안에서만 판정한다(take_touches). 진입 전이면 `−`.
+        r = next((r for r in rows if r["kind"] == kind), None)
+        if r is None or r["price"] is None:
+            return "—"
+        if not res["window"]:
+            return f"{fmt(r['price'])} …"
+        if kind not in takes:
+            return f"{fmt(r['price'])} −"
+        hit = takes[kind]
+        return f"{fmt(r['price'])} ✓ {hit['date']}" if hit else f"{fmt(r['price'])} ·{dist(r['price'])}"
+
+    return {"1차 진입": cell("entry"), "가격 무효화": cell("stop"),
+            "일부 정리": take_cell("take"), "전량 정리": take_cell("take_all")}
+
+
+def previous_ledger(root: Path) -> dict[str, dict[str, str]]:
+    """커밋된 원장(HEAD)의 행 — 브리프 파일명 → {열 이름: 칸}.
+
+    작업 트리의 파일은 읽지 않는다. `> briefs/ledger.md`로 쓰면 셸이 파일을 먼저 비우기 때문이다.
+    """
+    try:
+        text = subprocess.run(["git", "-C", str(root), "show", "HEAD:briefs/ledger.md"],
+                              capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return {}
+    prev: dict[str, dict[str, str]] = {}
+    head: list[str] | None = None
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            head = None
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0] == "작성일":
+            head = cells
+        elif head and not set(cells[0]) <= {"-"}:
+            m = re.search(r"\(\./([^)]+)\)", line)
+            if m:
+                prev[m.group(1)] = dict(zip(head, cells))
+    return prev
+
+
+def regressions(results: list[dict], cells: dict[str, dict[str, str]], prev: dict) -> list[str]:
+    """이전 원장에서 ✓였던 칸이 이번에 ✓가 아니면 적는다.
+
+    관찰된 종가는 지나간 사실이라 되돌아가지 않는다. 되돌아갔다면 원자료가 빠졌거나
+    (종가 공란·캐시) 소급 조정(분할)된 것이고, 어느 쪽이든 사람이 봐야 한다.
+    """
+    out = []
+    for res in results:
+        stem = res["brief"]["path"].stem
+        old = prev.get(stem, {})
+        for col in LEVEL_COLS:
+            m = re.search(r"✓ (\d{4}-\d{2}-\d{2})", old.get(col, ""))
+            if m and f"✓ {m.group(1)}" not in cells[stem][col]:
+                out.append(f"`{stem}` {col} — 이전 원장 `{old[col]}` → 이번 `{cells[stem][col]}`")
+    return out
+
+
+def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_days: int,
+                root: Path) -> str:
     now = datetime.now(KST)
+    order = sorted(results, key=lambda r: r["brief"]["path"].name, reverse=True)
+    live = [r for r in order if r["verdict"]["code"] not in ENDED and not r["closed_on"]]
+    done = [r for r in order if r not in live]
+    cells = {r["brief"]["path"].stem: ledger_cells(r, r in live) for r in order}
+
     out = ["---", "title: 조건 원장", "---", "",
            "# 조건 원장", "",
            "브리프 9절에 적은 **가격 조건**이 그 뒤 종가로 관찰됐는지의 기록이다.",
@@ -474,55 +585,60 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
            "가격 조건에 공시·일정이 함께 걸린 행은 종가 돌파가 필요조건일 뿐이다. 이 표는 매매 성과가 아니라",
            "**내가 쓴 조건이 관찰됐는가의 사후 기록**이다.", "",
            "정리(파는 가격)는 1차 진입이 관찰된 날부터 가격 무효화가 관찰되기 전날까지만 판정한다.",
-           "관망 브리프의 정리 가격은 \"관망 유지\"의 경계라서 매도 조건이 아니기 때문이다.", "",
-           "| 작성일 | 종목 | 기준 종가 | 1차 진입 | 가격 무효화 | 일부 정리 | 전량 정리 | 판정 | 추적 |",
-           "|---|---|---|---|---|---|---|---|---|"]
-    for res in sorted(results, key=lambda r: r["brief"]["path"].name, reverse=True):
+           "관망 브리프의 정리 가격은 \"관망 유지\"의 경계라서 매도 조건이 아니기 때문이다.", ""]
+
+    def row(res, with_last):
         b, fmt = res["brief"], res["fmt"]
-        e = next((r for r in res["rows"] if r["kind"] == "entry"), None)
-        s = next((r for r in res["rows"] if r["kind"] == "stop"), None)
-
-        def cell(r):
-            if r is None or r["price"] is None:
-                return "—"
-            mark = {"충족": "✓", "이탈": "✓", "가격 조건 관찰": "✓",
-                    "미충족": "·", "가격 조건 미관찰": "·", "추적 전": "…"}.get(r["verdict"], "?")
-            date = f" {r['hit']['date']}" if r.get("hit") else ""
-            return f"{fmt(r['price'])} {mark}{date}"
-
-        def take_cell(kind):
-            # 정리는 보유 구간 안에서만 판정한다(take_touches). 진입 전이면 `−`.
-            r = next((r for r in res["rows"] if r["kind"] == kind), None)
-            if r is None or r["price"] is None:
-                return "—"
-            if not res["window"]:
-                return f"{fmt(r['price'])} …"
-            if kind not in takes:
-                return f"{fmt(r['price'])} −"
-            hit = takes[kind]
-            return f"{fmt(r['price'])} ✓ {hit['date']}" if hit else f"{fmt(r['price'])} ·"
-
-        takes = take_touches(res["rows"], res["window"])
-
+        c = cells[b["path"].stem]
         if not res["window"]:
             track = "—"
         elif res["closed_on"]:
             track = f"종료 {res['closed_on']}"
         else:
             track = f"~{res['window'][-1]['date']}"
-        link = f"[{b['name']}](./{b['path'].stem})"
-        out.append(f"| {b['date']} | {link} | {fmt(b['base_close'])} | {cell(e)} | {cell(s)} "
-                   f"| {take_cell('take')} | {take_cell('take_all')} "
-                   f"| {res['verdict']['code']} | {track} |")
+        last = (f" | {fmt(res['window'][-1]['close'])} ({res['window'][-1]['date'][5:]})"
+                if res["window"] else " | —") if with_last else ""
+        return (f"| {b['date']} | [{b['name']}](./{b['path'].stem}) | {fmt(b['base_close'])}{last} | "
+                + " | ".join(c[k] for k in LEVEL_COLS)
+                + f" | {res['verdict']['code']} | {track} |")
+
+    out += ["## 진행 중", "",
+            "계획이 아직 끝나지 않은 브리프다. 관찰되지 않은 가격 옆의 %는 **최근 종가에서 그 가격까지 남은 거리**다.", ""]
+    if live:
+        out += ["| 작성일 | 종목 | 기준 종가 | 최근 종가 | " + " | ".join(LEVEL_COLS) + " | 판정 | 추적 |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
+        out += [row(r, True) for r in live]
+    else:
+        out.append("진행 중인 브리프가 없다.")
+    out += ["", "## 종료", "",
+            "가격 무효화·전량 정리가 관찰됐거나 추적 창이 닫혀 계획이 끝난 브리프다.", ""]
+    if done:
+        out += ["| 작성일 | 종목 | 기준 종가 | " + " | ".join(LEVEL_COLS) + " | 판정 | 추적 |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        out += [row(r, False) for r in done]
+    else:
+        out.append("아직 종료된 브리프가 없다.")
 
     pend = [r for res in results for r in res["rows"] if r["kind"] == "thesis"]
     tally: dict[str, int] = {}
     for res in results:
         tally[res["verdict"]["code"]] = tally.get(res["verdict"]["code"], 0) + 1
-    out += ["", f"`✓` 관찰됨 · `·` 미관찰 · `…` 추적 전 · `−` 진입 전(정리는 진입 뒤에만 판정) · `?` 미판정. "
+    out += ["", "`✓` 관찰됨 · `·` 미관찰 · `…` 추적 전 · `−` 진입 전(정리는 진입 뒤에만 판정) · `?` 미판정. "
             f"논거 무효화 {len(pend)}건은 공시 확인이 남아 있다.", "",
             f"**판정 집계** — 총 {len(results)}건 · "
             + " · ".join(f"{k} {v}건" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])), ""]
+
+    back = regressions(results, cells, previous_ledger(root))
+    if back:
+        out += ["**이전 원장과 어긋난 판정** — 관찰된 종가는 되돌아가지 않는다. "
+                "원자료가 빠졌거나 소급 조정된 것이므로 원자료를 확인한다.", ""]
+        out += [f"- {m}" for m in back] + [""]
+        for m in back:
+            print(f"[경고] 판정 되돌림 — {m}", file=sys.stderr)
+    blanks = [(r["brief"]["path"].stem, d) for r in order for d in blanks_of(r)]
+    if blanks:
+        out += ["**원자료 종가 공란으로 판정에서 빠진 날**", ""]
+        out += [f"- `{stem}` — {d}" for stem, d in blanks] + [""]
     if failures:
         out += ["**판정하지 못한 브리프**", ""]
         out += [f"- `{p.name}` — {why}" for p, why in failures] + [""]
@@ -568,7 +684,7 @@ def main() -> None:
             failures.append((p, str(e).replace("\n", " ")))
 
     if args.emit == "ledger":
-        print(emit_ledger(results, failures, args.window_days))
+        print(emit_ledger(results, failures, args.window_days, root))
     else:
         print("\n\n".join(emit_plain(r) for r in results))
         if results:
