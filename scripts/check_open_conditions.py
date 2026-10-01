@@ -439,7 +439,7 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
            "**내가 쓴 조건이 관찰됐는가의 사후 기록**이다.", "",
            "| 작성일 | 종목 | 기준 종가 | 1차 진입 | 가격 무효화 | 판정 | 추적 |",
            "|---|---|---|---|---|---|---|"]
-    for res in results:
+    for res in sorted(results, key=lambda r: r["brief"]["path"].name, reverse=True):
         b, fmt = res["brief"], res["fmt"]
         e = next((r for r in res["rows"] if r["kind"] == "entry"), None)
         s = next((r for r in res["rows"] if r["kind"] == "stop"), None)
