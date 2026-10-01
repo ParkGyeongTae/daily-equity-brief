@@ -36,7 +36,8 @@
 원자료
     가격은 `fetch_ohlcv.py`와 같은 경로로 받아 **스크래치패드에 파일로 저장한 뒤 그 파일에서**
     판정한다(AGENTS.md "4단계"). 파일명에 range를 넣어 짧은 구간 캐시가 긴 요청을 덮어쓰지
-    않게 한다. `--refresh`를 주면 다시 받는다. 미확정 봉은 `technicals.py`의 판정을 그대로 써서
+    않게 한다. 추적 중인 브리프는 매번 다시 받고(저장분을 다시 쓰면 그 뒤 봉이 빠져
+    판정이 조용히 되돌아간다), 창이 닫힌 브리프만 저장분을 쓴다. `--refresh`는 그것까지 다시 받는다. 미확정 봉은 `technicals.py`의 판정을 그대로 써서
     제외한다 — 조건은 모두 종가 기준이므로 장중 봉으로 판정하면 안 된다.
     기준 종가를 원자료와 대조해 어긋나면 `[주의]`로 찍는다. 티커 해석이 틀렸는지를 여기서 잡는다.
 
@@ -256,7 +257,9 @@ def evaluate(brief: dict, scratch: Path, refresh: bool, window_days: int) -> dic
     base = date.fromisoformat(brief["base_date"])
     elapsed = (today - base).days
     # 창이 닫힌 브리프의 원자료는 더 바뀌지 않는다 — 한 번 받아 두고 다시 받지 않는다.
+    # 열린 창은 반대다 — 저장된 파일을 다시 쓰면 그 뒤의 봉이 빠진 채 판정이 **조용히 되돌아간다.**
     closed = window_days > 0 and elapsed > window_days
+    refresh = refresh or not closed
     # 창은 끝을 자를 뿐이고, 원자료는 기준 종가일까지 **거슬러** 닿아야 한다.
     data = price_bars(ticker, brief["base_date"], elapsed + 10,
                       scratch / ("settled" if closed else "open"), refresh)
@@ -320,6 +323,29 @@ def evaluate(brief: dict, scratch: Path, refresh: bool, window_days: int) -> dic
             "notes": notes, "verdict": verdict_of(results, window)}
 
 
+def take_touches(rows: list[dict], window: list[dict]) -> dict[str, dict | None]:
+    """정리 행이 **보유 구간 안에서** 처음 관찰된 봉. 보유 구간이 없으면 키가 없다.
+
+    정리는 진입한 뒤에야 뜻이 있다. 관망 브리프의 `전량 정리` 가격은 "관망 유지"의 경계이고,
+    무효화가 먼저 났으면 그 뒤의 상승은 정리가 아니다. 그래서 1차 진입 관찰일부터
+    가격 무효화 관찰일 **전날**까지만 본다(같은 날이면 무효화가 우선한다).
+    """
+    entry = next((r for r in rows if r["kind"] == "entry"), None)
+    stop = next((r for r in rows if r["kind"] == "stop"), None)
+    e_hit = (entry or {}).get("hit")
+    s_hit = (stop or {}).get("hit")
+    if not e_hit or (s_hit and s_hit["date"] <= e_hit["date"]):
+        return {}
+    held = [b for b in window if b["date"] >= e_hit["date"]
+            and (not s_hit or b["date"] < s_hit["date"])]
+    out: dict[str, dict | None] = {}
+    for kind in ("take", "take_all"):
+        r = next((r for r in rows if r["kind"] == kind), None)
+        if r and r.get("price") is not None:
+            out[kind] = first_touch(held, r["price"], "up")
+    return out
+
+
 def verdict_of(rows: list[dict], window: list[dict]) -> dict:
     """진입과 무효화 중 무엇이 먼저 관찰됐는가 — 계획 한 건의 결말이다."""
     if not window:
@@ -341,12 +367,22 @@ def verdict_of(rows: list[dict], window: list[dict]) -> dict:
     if s_hit and (not e_hit or s_hit["date"] < e_hit["date"]):
         return {"code": "진입 없이 무효화",
                 "text": f"{s_hit['date']} 가격 무효화 이탈 — 진입 없이 계획 종료"}
-    if e_hit and not s_hit:
-        out = {"code": "진입 가격 조건 충족",
-               "text": f"{e_hit['date']} 1차 진입 가격 조건 충족, 무효화 미관찰"}
+    takes = take_touches(rows, window)
+    t1, t2 = takes.get("take"), takes.get("take_all")
+    if t2:
+        # 전량 정리가 관찰되면 계획은 거기서 끝난다 — 그 뒤의 무효화는 보지 않는다.
+        mid = f" → {t1['date']} 일부 정리" if t1 and t1["date"] < t2["date"] else ""
+        out = {"code": "전량 정리 관찰",
+               "text": f"{e_hit['date']} 1차 진입 가격 조건 충족{mid} → {t2['date']} 전량 정리 가격 조건 관찰"}
+    elif e_hit and not s_hit:
+        out = {"code": "일부 정리 관찰" if t1 else "진입 가격 조건 충족",
+               "text": f"{e_hit['date']} 1차 진입 가격 조건 충족"
+                       + (f" → {t1['date']} 일부 정리 가격 조건 관찰" if t1 else "")
+                       + ", 무효화 미관찰"}
     else:
-        out = {"code": "충족 후 무효화",
-               "text": f"{e_hit['date']} 1차 진입 가격 조건 충족 → {s_hit['date']} 가격 무효화 이탈"}
+        mid = f" → {t1['date']} 일부 정리" if t1 else ""
+        out = {"code": "일부 정리 후 무효화" if t1 else "충족 후 무효화",
+               "text": f"{e_hit['date']} 1차 진입 가격 조건 충족{mid} → {s_hit['date']} 가격 무효화 이탈"}
     if entry.get("extra"):
         out["text"] += " · 1차 진입에 가격 외 조건이 있어 진입 성립은 별도 확인이 필요하다"
 
@@ -437,8 +473,10 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
            "판정은 **가격 조건에 한정된다.** 논거 무효화처럼 공시를 읽어야 하는 조건은 `미판정`으로 남고,",
            "가격 조건에 공시·일정이 함께 걸린 행은 종가 돌파가 필요조건일 뿐이다. 이 표는 매매 성과가 아니라",
            "**내가 쓴 조건이 관찰됐는가의 사후 기록**이다.", "",
-           "| 작성일 | 종목 | 기준 종가 | 1차 진입 | 가격 무효화 | 판정 | 추적 |",
-           "|---|---|---|---|---|---|---|"]
+           "정리(파는 가격)는 1차 진입이 관찰된 날부터 가격 무효화가 관찰되기 전날까지만 판정한다.",
+           "관망 브리프의 정리 가격은 \"관망 유지\"의 경계라서 매도 조건이 아니기 때문이다.", "",
+           "| 작성일 | 종목 | 기준 종가 | 1차 진입 | 가격 무효화 | 일부 정리 | 전량 정리 | 판정 | 추적 |",
+           "|---|---|---|---|---|---|---|---|---|"]
     for res in sorted(results, key=lambda r: r["brief"]["path"].name, reverse=True):
         b, fmt = res["brief"], res["fmt"]
         e = next((r for r in res["rows"] if r["kind"] == "entry"), None)
@@ -452,6 +490,20 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
             date = f" {r['hit']['date']}" if r.get("hit") else ""
             return f"{fmt(r['price'])} {mark}{date}"
 
+        def take_cell(kind):
+            # 정리는 보유 구간 안에서만 판정한다(take_touches). 진입 전이면 `−`.
+            r = next((r for r in res["rows"] if r["kind"] == kind), None)
+            if r is None or r["price"] is None:
+                return "—"
+            if not res["window"]:
+                return f"{fmt(r['price'])} …"
+            if kind not in takes:
+                return f"{fmt(r['price'])} −"
+            hit = takes[kind]
+            return f"{fmt(r['price'])} ✓ {hit['date']}" if hit else f"{fmt(r['price'])} ·"
+
+        takes = take_touches(res["rows"], res["window"])
+
         if not res["window"]:
             track = "—"
         elif res["closed_on"]:
@@ -460,11 +512,17 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
             track = f"~{res['window'][-1]['date']}"
         link = f"[{b['name']}](./{b['path'].stem})"
         out.append(f"| {b['date']} | {link} | {fmt(b['base_close'])} | {cell(e)} | {cell(s)} "
+                   f"| {take_cell('take')} | {take_cell('take_all')} "
                    f"| {res['verdict']['code']} | {track} |")
 
     pend = [r for res in results for r in res["rows"] if r["kind"] == "thesis"]
-    out += ["", f"`✓` 관찰됨 · `·` 미관찰 · `…` 추적 전 · `?` 미판정. "
-            f"논거 무효화 {len(pend)}건은 공시 확인이 남아 있다.", ""]
+    tally: dict[str, int] = {}
+    for res in results:
+        tally[res["verdict"]["code"]] = tally.get(res["verdict"]["code"], 0) + 1
+    out += ["", f"`✓` 관찰됨 · `·` 미관찰 · `…` 추적 전 · `−` 진입 전(정리는 진입 뒤에만 판정) · `?` 미판정. "
+            f"논거 무효화 {len(pend)}건은 공시 확인이 남아 있다.", "",
+            f"**판정 집계** — 총 {len(results)}건 · "
+            + " · ".join(f"{k} {v}건" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])), ""]
     if failures:
         out += ["**판정하지 못한 브리프**", ""]
         out += [f"- `{p.name}` — {why}" for p, why in failures] + [""]
