@@ -42,7 +42,8 @@
     기준 종가를 원자료와 대조해 어긋나면 `[주의]`로 찍는다. 티커 해석이 틀렸는지를 여기서 잡는다.
 
 원장(`--emit ledger`)
-    `진행 중`과 `종료` 두 표로 나눈다. 진행 중 표에는 최근 종가와, 관찰되지 않은 가격까지
+    1차 진입이 빈 칸에는 브리프의 스탠스(`관망`·`보류`)를 적는다. 그 밖의 스탠스인데 비었거나
+    행을 읽지 못했으면 `?`로 두고 원장 아래와 stderr에 적는다. `진행 중`과 `종료` 두 표로 나눈다. 진행 중 표에는 최근 종가와, 관찰되지 않은 가격까지
     남은 거리(%)를 붙인다. 커밋된 원장(HEAD)에서 ✓였던 칸이 ✓가 아니게 되면 **판정 되돌림**으로
     원장과 stderr에 적는다 — 관찰된 종가는 지나간 사실이라 되돌아가지 않으므로, 되돌아갔다면
     원자료가 빠졌거나(종가 공란) 소급 조정(분할)된 것이다. 종가가 공란이라 빠진 날도 따로 적는다.
@@ -78,6 +79,9 @@ KST = timezone(timedelta(hours=9))
 BASE_CLOSE_RE = re.compile(r"기준 종가\s*([₩$€¥])?\s*([\d,]+(?:\.\d+)?)\s*\((\d{4}-\d{2}-\d{2})\)")
 PRICE_RE = re.compile(r"([₩$€¥])?\s*([\d,]+(?:\.\d+)?)")
 MARKET_RE = re.compile(r"\|\s*티커\s*/\s*시장\s*\|([^|]*)\|")
+STANCE_RE = re.compile(r"^\|\s*현재 스탠스\s*\|\s*([^|—\-(]+)", re.M)
+# 1차 진입 행을 비울 수 있는 스탠스(daily-brief 스킬 6단계). 나머지는 진입 조건을 전제한다.
+NO_ENTRY_STANCES = {"관망", "보류"}
 
 # `구분` → (방향, 종류). workflow.md 6단계 표가 고정한 어휘다.
 # 방향을 조건 문장이 아니라 이 어휘에서 가져오는 것이 이 스크립트가 성립하는 이유다.
@@ -130,6 +134,8 @@ def parse_brief(path: Path) -> dict:
 
     mk = MARKET_RE.search(raw)
     market = (mk.group(1) if mk else "").strip()
+    st = STANCE_RE.search(raw)
+    stance = st.group(1).strip() if st else None
 
     plan = V.section_by_number(sections, 9)
     if plan is None:
@@ -159,7 +165,7 @@ def parse_brief(path: Path) -> dict:
 
     return {"path": path, "date": file_date, "code": code, "name": name,
             "market": market, "base_date": base_date, "base_close": base_close,
-            "base_sym": base_sym, "rows": rows}
+            "base_sym": base_sym, "rows": rows, "stance": stance}
 
 
 def parse_price(cell: str) -> float | None:
@@ -499,6 +505,9 @@ def ledger_cells(res: dict, live: bool) -> dict[str, str]:
 
     def cell(kind):
         r = next((r for r in rows if r["kind"] == kind), None)
+        if kind == "entry" and (r is None or r["price"] is None):
+            # 비운 이유를 보인다 — 판단해서 비운 칸(관망·보류)과 고쳐야 할 칸(`?`)을 가른다.
+            return res["brief"]["stance"] if entry_gap(res) is None else "?"
         if r is None or r["price"] is None:
             return "—"
         mark = {"충족": "✓", "이탈": "✓", "가격 조건 관찰": "✓",
@@ -523,6 +532,20 @@ def ledger_cells(res: dict, live: bool) -> dict[str, str]:
 
     return {"1차 진입": cell("entry"), "가격 무효화": cell("stop"),
             "일부 정리": take_cell("take"), "전량 정리": take_cell("take_all")}
+
+
+def entry_gap(res: dict) -> str | None:
+    """1차 진입 가격이 비었는데 그 이유가 스탠스로 설명되지 않으면 사유를 돌려준다."""
+    r = next((r for r in res["rows"] if r["kind"] == "entry"), None)
+    if r is not None and r["price"] is not None:
+        return None
+    stance = res["brief"]["stance"]
+    if stance in NO_ENTRY_STANCES:
+        return None
+    what = "1차 진입 행이 없다" if r is None else "1차 진입 행의 가격 칸에서 숫자를 읽지 못했다"
+    if stance is None:
+        return f"{what} — 스냅샷의 현재 스탠스도 찾지 못했다"
+    return f"{what} — 스탠스 `{stance}`는 진입 조건을 전제한다(비울 수 있는 것은 관망·보류)"
 
 
 def previous_ledger(root: Path) -> dict[str, dict[str, str]]:
@@ -624,6 +647,7 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
     for res in results:
         tally[res["verdict"]["code"]] = tally.get(res["verdict"]["code"], 0) + 1
     out += ["", "`✓` 관찰됨 · `·` 미관찰 · `…` 추적 전 · `−` 진입 전(정리는 진입 뒤에만 판정) · `?` 미판정. "
+            "1차 진입 칸의 `관망`·`보류`는 공시 전이라 진입 조건을 일부러 쓰지 않은 브리프다. "
             f"논거 무효화 {len(pend)}건은 공시 확인이 남아 있다.", "",
             f"**판정 집계** — 총 {len(results)}건 · "
             + " · ".join(f"{k} {v}건" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])), ""]
@@ -635,6 +659,12 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
         out += [f"- {m}" for m in back] + [""]
         for m in back:
             print(f"[경고] 판정 되돌림 — {m}", file=sys.stderr)
+    gaps = [(r["brief"]["path"].stem, entry_gap(r)) for r in order if entry_gap(r)]
+    if gaps:
+        out += ["**1차 진입이 비었는데 스탠스와 맞지 않는 브리프** — 9절 표를 확인한다.", ""]
+        out += [f"- `{stem}` — {why}" for stem, why in gaps] + [""]
+        for stem, why in gaps:
+            print(f"[경고] 1차 진입 공란 — {stem}: {why}", file=sys.stderr)
     blanks = [(r["brief"]["path"].stem, d) for r in order for d in blanks_of(r)]
     if blanks:
         out += ["**원자료 종가 공란으로 판정에서 빠진 날**", ""]
