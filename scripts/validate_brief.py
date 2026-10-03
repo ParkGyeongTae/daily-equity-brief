@@ -77,7 +77,7 @@ INDICATOR_ROWS = re.compile(r"^(SMA|RSI|MACD|ATR|볼린저|%B)")
 # ① 결론 층 (AGENTS.md "세 층으로 쌓는다"). 0절보다 앞에 오고, 1분에 읽힌다.
 LEAD = "지금 무엇을 하는가"
 LEAD_ROWS = ("산다", "판다", "계획을 버린다")
-LEAD_MAX = 1000
+LEAD_MAX = 900  # AGENTS.md "세 층으로 쌓는다" — 표 포함 900자
 # 결론 절의 가격은 9절 표에서 가져온 것이어야 한다 — 두 곳에 쓰면 어긋난다.
 MONEY_RE = re.compile(r"[₩$]\s?[\d,]+(?:\.\d+)?")
 # ③ 감사 층 — 제목은 남기고 본문만 접는다.
@@ -291,7 +291,7 @@ def check_lead(rep: Report, lines: list[str], sections: list[dict]) -> None:
 
     text = body_text(sec)
     if len(text) > LEAD_MAX:
-        rep.warn(ln, f"결론 절이 {len(text)}자다 (900자 목표) — 못 담은 조건은 9절에 두고 옮겨 적지 않는다")
+        rep.warn(ln, f"결론 절이 {len(text)}자다 ({LEAD_MAX}자 이내) — 못 담은 조건은 9절에 두고 옮겨 적지 않는다")
 
     rows = table_rows(sec)
     labels = " ".join(c for _, r in rows for c in r.strip("|").split("|")[:1])
