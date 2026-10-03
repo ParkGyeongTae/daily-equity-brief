@@ -4,3 +4,6 @@ node_modules/
 .DS_Store
 .env
 __pycache__/
+# 공시 원문은 $SCRATCH에 받는다(스킬 4단계). 루트에 잘못 받은 것이 커밋되지 않게 막는다.
+/doc-*
+/*.zip
