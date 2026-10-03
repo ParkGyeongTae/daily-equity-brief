@@ -13,6 +13,35 @@ description: 오늘의 브리프 한 건을 쓰는 절차 — 제외 목록, 시
 이 절차는 **사람 없이 매일 07:00에 실행된다.** 그러므로 먼저 확인할 것은 "오늘 이미 썼는가"다.
 재시도·수동 요청이 겹치면 같은 날 두 번째 브리프를 쓰게 되고, 그건 아무도 요청하지 않은 결과다.
 
+### 시작 상태를 맞춘다
+
+무인 실행은 `claude/…` 세션 브랜치에서 시작하고, 그 브랜치에는 upstream이 없다. 그대로 두면
+`git pull`이 실패하고 오늘 파일 확인이 **낡은 `briefs/`를 본다.** 커밋은 `main`에 하므로
+(AGENTS.md "커밋") 처음부터 `main`에서 시작한다.
+
+```bash
+git fetch -q origin main
+git switch main 2>/dev/null || git switch -c main origin/main
+git pull --ff-only origin main
+```
+
+pull이 실패해도 멈추지 않는다 — 실패했다는 사실을 적고 계속한다. 다만 그때는 오늘 파일 확인이
+원격의 최신 상태를 못 봤을 수 있으므로, 9단계 푸시가 거부되면 **pull 후 오늘 파일을 다시 확인한다.**
+
+그다음 GitHub에 쓸 수단을 정한다 — 8단계 이슈와 9단계 배포 확인이 이것을 쓴다.
+
+```bash
+gh auth status
+```
+
+- 통과하면 `gh`를 쓴다.
+- 실패하면(무인 실행에서는 `gh`가 없거나, 환경이 넣은 `GH_TOKEN`을 `gh`가 받지 못한다)
+  **GitHub 연동 도구(`mcp__github__*`)를 쓴다.** 이슈 생성과 워크플로 실행 조회가 거기 있다.
+- 둘 다 없으면 8단계에서 이슈 대신 **최종 보고에 남은 지적을 전부** 적는다.
+- 세 결과(pull · `gh` · 대신 쓴 수단)를 `## 방법론 · 재현`에 한 줄씩 적는다.
+
+### 오늘 파일을 확인한다
+
 ```bash
 # 오늘 파일이 이미 있으면 새로 쓰지 않는다.
 TODAY=$(TZ=Asia/Seoul date +%F)
@@ -23,7 +52,9 @@ ls briefs/$TODAY-*.md 2>/dev/null
   하루 두 건은 **사람이 명시적으로 두 번째를 요청했을 때만** 쓴다.
 - 파일이 없으면 아래로 간다.
 
-그다음 제외 목록이다. 후보를 찾기 **전에** 만든다. 나중에 하면 이미 쓴 종목에 시간을 버린다.
+### 제외 목록을 만든다
+
+후보를 찾기 **전에** 만든다. 나중에 하면 이미 쓴 종목에 시간을 버린다.
 
 ```bash
 # 최근 7일 내 작성한 브리프의 종목 코드
@@ -123,15 +154,23 @@ for h in d["hits"]["hits"]:
 ```
 
 ```bash
-# 한국 — DART 접수 목록. pblntf_ty=B 주요사항보고, I 거래소 수시공시. corp_cls Y=유가증권 K=코스닥.
+# 한국 — DART 접수 목록. pblntf_ty B=주요사항보고 I=거래소 수시공시(영업실적 공정공시·단일판매공급계약이 여기다).
+# corp_cls Y=유가증권 K=코스닥. API는 한 번에 한 값만 받으므로 네 조합을 돈다 — 하나만 받으면
+# 한국 실적 공시(I)와 코스닥(K)이 통째로 빠진다.
 K="${DART_API_KEY:-$(grep -E '^DART_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}"
 BGN=$(TZ=Asia/Seoul date -v-2d +%Y%m%d 2>/dev/null || TZ=Asia/Seoul date -d '2 days ago' +%Y%m%d)
-curl -s "https://opendart.fss.or.kr/api/list.json?crtfc_key=$K&bgn_de=$BGN&end_de=$(TZ=Asia/Seoul date +%Y%m%d)&pblntf_ty=B&corp_cls=Y&page_count=30" \
-  | python3 -c 'import json,sys
+for TY in B I; do for CLS in Y K; do
+  echo "== pblntf_ty=$TY corp_cls=$CLS"
+  curl -s "https://opendart.fss.or.kr/api/list.json?crtfc_key=$K&bgn_de=$BGN&end_de=$(TZ=Asia/Seoul date +%Y%m%d)&pblntf_ty=$TY&corp_cls=$CLS&page_count=100" \
+    | python3 -c 'import json,sys
 d=json.load(sys.stdin)
-print("status:", d.get("status"), d.get("message"))
+print("status:", d.get("status"), d.get("message"), "· 총", d.get("total_count"), "건")
 for it in (d.get("list") or []): print(it["rcept_dt"], "|", it["corp_name"], "|", it["report_nm"])'
+done; done
 ```
+
+- `I`는 건수가 많다. 정정공시·자회사 공시·소액 계약은 점수표 ①에서 떨어지므로 눈으로 거르되,
+  **걸러낸 기준을 점수표 아래에 적는다.** `total_count`가 100을 넘으면 `page_no=2`를 이어 받는다.
 
 - 검색어·공시유형을 바꿨으면 **무엇으로 바꿨는지 `## 방법론 · 재현`에 적는다.** 경로를 바꾸는 것은
   허용되지만 조용히 바꾸는 것은 허용되지 않는다.
@@ -192,9 +231,10 @@ for it in (d.get("list") or []): print(it["rcept_dt"], "|", it["corp_name"], "|"
 - 후보 일봉 수집에서 **결측·실패가 난 후보는 그 사실을 점수표 비고에 적는다.** 조용히 후보에서 빼지 않는다.
 
 ```bash
-# 후보 채점용 — 1년 일봉이면 ③⑤에 충분하다.
-python3 scripts/fetch_ohlcv.py <후보티커> --range 1y --interval 1d -o "$SCRATCH/<후보티커>-1d.json"
-python3 scripts/technicals.py "$SCRATCH/<후보티커>-1d.json" --drop-unconfirmed --emit table
+# 후보 채점용 — 1년 일봉이면 ③⑤에 충분하다. 파일명에 `cand`를 넣는다: 선정 종목은 4단계에서
+# 2y로 다시 받는데, 같은 이름이면 fetch_ohlcv.py가 덮어쓰기를 거부한다(그때 --force로 넘기지 않는다).
+python3 scripts/fetch_ohlcv.py <후보티커> --range 1y --interval 1d -o "$SCRATCH/<후보티커>-cand-1d.json"
+python3 scripts/technicals.py "$SCRATCH/<후보티커>-cand-1d.json" --drop-unconfirmed --emit table
 ```
 
 ③은 표의 **20봉 평균 거래대금** 행으로, ⑤는 `--emit levels`의 클러스터 유무와 "공백 구간" 경고로 매긴다.
@@ -208,8 +248,8 @@ python3 scripts/technicals.py "$SCRATCH/<후보티커>-1d.json" --drop-unconfirm
 위임할 때 넘기는 것은 네 가지다 — 종목/티커, 3단계에서 정한 **확인할 질문**, 회계연도 기준,
 그리고 **2절 산업 소절에 쓸 항목**(한국: 사업보고서 II장의 산업의 특성·성장성·경기변동·시장점유율 /
 미국: 10-K Item 1의 Competition·Customers·Raw Materials·Seasonality). 산업 배경도 공시에서 온다.
-받는 것은 그 에이전트가 정의한 다섯 덩어리(열어본 문서 / 수치 / 사업 구조 / 산업 배경 /
-질문별 확인·반박)다.
+받는 것은 그 에이전트가 정의한 여섯 덩어리(열어본 문서 / 수치 / 사업 구조 / 산업 배경 /
+질문별 확인·반박 / 배수 밴드 분모)다. 밴드에 쓸 지표(EPS·BPS)를 정했으면 함께 넘긴다.
 범위를 주지 않고 "조사해줘"라고 던지면 수백 페이지를 읽고 돌아오므로 **질문을 반드시 함께 넘긴다.**
 
 시장 데이터는 위임하지 않는다. 아래 스크립트로 메인 세션이 직접 받는다.
@@ -222,6 +262,8 @@ python3 scripts/technicals.py "$SCRATCH/<후보티커>-1d.json" --drop-unconfirm
 | 미국 | SEC EDGAR (sec.gov/edgar) | 10-K, 10-Q, 8-K, DEF 14A, 실적 발표 보도자료(EX-99) |
 
 - 공시 원문 URL을 `## 출처`에 전부 남긴다. 링크 없는 주장은 쓰지 않는다.
+- 내려받은 공시 원문(zip·txt·xml)은 **`$SCRATCH` 아래에** 둔다. 저장소 루트에 받으면 커밋 직전에
+  지워야 하고, 놓치면 공시 원문이 공개 저장소에 올라간다.
 - IR 페이지의 실적 발표 자료는 보조 자료다. 공시본이 있으면 공시본을 우선한다.
 - 종목 선정용 뉴스는 출처에 포함하되 "선정 계기"로 명확히 구분한다.
 - API 키는 **환경변수 우선, 없으면 `.env`**다(`.env.template` 참고). EDGAR는 `SEC_USER_AGENT`
@@ -248,6 +290,8 @@ python3 scripts/fetch_ohlcv.py <TICKER> --range 5y  --interval 1wk -o "$SCRATCH/
 
 - 받은 원자료를 **스크래치패드에 파일로 저장하고**, 모든 지표는 그 파일에서 계산한다.
   화면에 뜬 값을 눈으로 옮겨 적지 않는다.
+- 원자료 옆에 **조회 기록(`<이름>.fetch.json`)**이 함께 생긴다. 미확정 봉 판정이 그 조회 시각을 쓰므로
+  **두 파일은 같이 다닌다** — 원자료만 옮기거나 이름을 바꾸면 재계산 값이 달라질 수 있다.
 - 스크립트 사용법·한계·수정주가 주의사항은 **`scripts/fetch_ohlcv.py`의 docstring이 마스터**다.
   여기 옮겨 적지 말고 `--help`로 확인한다.
 - **미확정 봉은 스크립트가 판정한다.** 일봉은 **거래소 정규장 시간** 기준이라 미국 장이 KST 자정을
@@ -338,7 +382,7 @@ python3 scripts/fetch_macro.py ecos 722Y001/D/0101000 --start 2023-09-24 -o "$SC
 - 터치 횟수는 클러스터에 묶인 스윙 포인트 개수이며 **강도의 근사치일 뿐 미래 지지·저항을 보장하지 않는다.**
 - 유효한 클러스터가 2개면 2개만 쓴다. 3개로 억지로 채우지 않는다.
 
-계산은 `scripts/technicals.py`로 한다. **네트워크를 쓰지 않고 저장된 파일만 읽으므로, 같은 파일을 넣으면 언제나 같은 값이 나온다.**
+계산은 `scripts/technicals.py`로 한다. **네트워크를 쓰지 않고 저장된 파일과 그 조회 기록만 읽으므로, 같은 파일을 넣으면 언제나 같은 값이 나온다.**
 
 ```bash
 D="$SCRATCH/<TICKER>-1d.json"; W="$SCRATCH/<TICKER>-1wk.json"
@@ -350,7 +394,8 @@ python3 scripts/technicals.py "$D" --drop-unconfirmed --emit facts   # 방법론
 
 - `--emit` 출력은 **손대지 말고 그대로** 붙여넣는다. 값을 손으로 고치면 원자료와 어긋나고 나중에 못 찾는다.
 - **`--drop-unconfirmed`를 기본으로 쓴다.** 제외된 봉은 `--emit facts`에 사유와 함께 남으므로
-  보고서가 그 판단을 그대로 담는다. 주봉은 진행 중인 주 + Yahoo가 덧붙인 중복 봉으로 **두 개가 빠질 수 있다.**
+  보고서가 그 판단을 그대로 담는다. 주봉은 진행 중인 주 + Yahoo가 덧붙인 중복 봉으로 **두 개가 빠질 수 있다**
+(평일 실행의 경우다 — 거래소 현지 토·일에는 그 주를 확정으로 보므로 중복 봉 하나만 빠진다).
   그때 주봉 표의 현재가는 마지막 **확정** 주봉 종가이므로 일봉의 기준 종가일과 다르다 —
   주봉 표에서는 **레벨 값만** 가져오고, 보고서의 기준 종가일은 일봉을 따른다(표 아래 경고가 이를 알려준다).
 - 지표 표는 **일봉으로 만든다.** 주봉 파일은 다년 지지/저항용이다(주봉 이동평균은 단위가 주라 일봉과 섞어 읽지 않는다).
@@ -621,7 +666,7 @@ python3 scripts/validate_brief.py briefs/<파일명>.md
 
 **② 교차 검증 (필수, 새 컨텍스트)**
 
-`brief-verifier` 서브에이전트에 보고서 경로와 원자료 경로를 넘긴다. 그 에이전트는 이 브리프를 쓰지 않았으므로
+`brief-verifier` 서브에이전트에 보고서 경로와 원자료 경로(조회 기록 `.fetch.json`과 배수 밴드의 분모 JSON 포함)를 넘긴다. 그 에이전트는 이 브리프를 쓰지 않았으므로
 작성 과정의 편향 없이 숫자를 원자료·출처 문서와 대조한다. **차단** 등급 발견이 하나라도 있으면 고치고 다시 돌린다.
 
 자기가 쓴 보고서를 자기가 채점하지 않는다 — 방금 그 숫자를 쓴 컨텍스트는 같은 실수를 두 번 못 본다.
@@ -638,6 +683,8 @@ python3 scripts/validate_brief.py briefs/<파일명>.md
 
 **멈췄으면 흔적을 남긴다.** 무인 실행이라 커밋이 없으면 저장소에도 사이트에도 아무 기록이 없고,
 주인은 그날 저녁에야 브리프가 없다는 것을 알게 된다. 그러므로 멈출 때는 이슈를 남긴다.
+수단은 1단계에서 정한 것이다 — `gh`, 안 되면 GitHub 연동 도구의 이슈 생성(제목·본문은 아래와 같다),
+둘 다 없으면 **최종 보고에 아래 본문을 그대로** 싣는다.
 
 ```bash
 gh issue create --title "브리프 미완 $(TZ=Asia/Seoul date +%F) — <종목>" --body "$(cat <<'EOF'
@@ -693,12 +740,14 @@ git push origin main
 푸시가 곧 게시는 아니다. 배포가 끝났는지 **확인한 뒤** 보고한다.
 
 ```bash
-gh run list --workflow=deploy.yml --limit 3
+# 1차 판정은 사이트 자체다 — gh 없이 된다. 배포는 대개 1~2분 걸리므로 몇 번 다시 본다.
 curl -s -o /dev/null -w "%{http_code}\n" \
   https://parkgyeongtae.github.io/daily-equity-brief/briefs/<파일명>
 ```
 
-200이면 됐고, 목록 페이지에 종목명이 뜨는지도 본다.
+200이면 됐고, 목록 페이지에 종목명이 뜨는지도 본다. 몇 분이 지나도 404면 워크플로 실행을 본다 —
+`gh run list --workflow=deploy.yml --limit 3`, `gh`가 안 되면 GitHub 연동 도구의 워크플로 실행 조회다.
+아래 복구의 `gh run cancel` · `gh workflow run`도 같은 식으로 연동 도구에서 한다.
 
 **브리프가 사이트에 안 보일 때** — 원인은 대개 파일이나 파서가 아니라 배포다.
 `build` 잡은 성공하는데 `deploy` 잡이 `waiting`에서 `queued`로 넘어가지 못하고 멈추는 일이 있다
