@@ -47,6 +47,12 @@
     남은 거리(%)를 붙인다. 커밋된 원장(HEAD)에서 ✓였던 칸이 ✓가 아니게 되면 **판정 되돌림**으로
     원장과 stderr에 적는다 — 관찰된 종가는 지나간 사실이라 되돌아가지 않으므로, 되돌아갔다면
     원자료가 빠졌거나(종가 공란) 소급 조정(분할)된 것이다. 종가가 공란이라 빠진 날도 따로 적는다.
+    이번 실행에서 판정하지 못한 브리프(429 등)는 **이전 원장의 행을 그대로 둔다** — 받기가 한 번
+    실패했다고 원장에서 행이 사라지면 그 브리프의 기록이 끊긴다. 그런 행은 원장 아래에 따로 적는다.
+
+받기 실패
+    받기에 실패했는데 저장된 원자료가 있으면 그 파일로 판정하고 `[주의]`로 남긴다(판정이 그 파일의
+    마지막 봉까지라는 뜻이다). 같은 실행 안에서 같은 원자료는 한 번만 받고, 요청 사이에는 쉰다.
 
 한계
     - 브리프 작성 후 **주식분할·병합**이 있었다면 Yahoo의 과거 종가가 소급 조정돼 브리프에
@@ -65,6 +71,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -207,6 +214,12 @@ def pick_range(days: int) -> str:
     return "max"
 
 
+# 요청 사이에 쉬는 초. 추적 중인 브리프가 90건 가까이 쌓이면 쉬지 않는 요청은 429를 부른다.
+FETCH_PACE = 1.0
+# 이번 실행에서 이미 받은 원자료 — 같은 티커의 브리프가 둘이어도 한 번만 받는다.
+_fetched: set[Path] = set()
+
+
 def fetch_bars(ticker: str, rng: str, scratch: Path, refresh: bool) -> dict:
     """원자료를 받아 **파일로 저장한 뒤 그 파일에서** 읽는다(AGENTS.md 4단계).
 
@@ -214,10 +227,20 @@ def fetch_bars(ticker: str, rng: str, scratch: Path, refresh: bool) -> dict:
     **추적 구간이 조용히 짧아진다.** 그 어긋남은 출력만 보고는 찾을 수 없다.
     """
     out = scratch / f"{ticker}-1d-{rng}.json"
-    if refresh or not out.exists():
-        payload = F.fetch(ticker, rng, "1d")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    stale = None
+    if (refresh and out not in _fetched) or not out.exists():
+        if _fetched:
+            time.sleep(FETCH_PACE)
+        try:
+            payload = F.fetch(ticker, rng, "1d")
+        except SystemExit as e:  # fetch()는 실패를 sys.exit로 알린다
+            if not out.exists():
+                raise
+            stale = (f"원자료를 다시 받지 못해 저장분({out.name})으로 판정했다 — "
+                     f"{' '.join(str(e).split())[:160]}")
+        else:
+            F.save(payload, out, ticker, rng, "1d")
+        _fetched.add(out)
     data = T.load(out, "close")
     # load()는 종가가 빈 봉을 휴장처럼 조용히 버린다. 거래일인데 공란이면 그날의 판정이
     # **소리 없이 빠지므로**, 버려진 날짜를 남겨 출력에 찍는다.
@@ -225,7 +248,8 @@ def fetch_bars(ticker: str, rng: str, scratch: Path, refresh: bool) -> dict:
     kept = {b["date"] for b in data["bars"]}
     data["blank"] = sorted({datetime.fromtimestamp(t, timezone.utc).astimezone(data["ex_tz"])
                             .strftime("%Y-%m-%d") for t in raw} - kept)
-    data["dropped"] = T.drop_unconfirmed(data, "daily", datetime.now(timezone.utc))
+    data["dropped"] = T.drop_unconfirmed(data, "daily", data["as_of"])
+    data["stale"] = stale
     data["src"] = out
     data["range"] = rng
     return data
@@ -283,6 +307,8 @@ def evaluate(brief: dict, scratch: Path, refresh: bool, window_days: int) -> dic
     data = price_bars(ticker, brief["base_date"], elapsed + 10,
                       scratch / ("settled" if closed else "open"), refresh)
 
+    if data["stale"]:
+        notes.append(data["stale"])
     cur = (data["meta"].get("currency") or "").upper()
     fmt = T.make_fmt(cur)
     sym = {"USD": "$", "KRW": "₩", "EUR": "€", "JPY": "¥"}.get(cur, "")
@@ -548,8 +574,8 @@ def entry_gap(res: dict) -> str | None:
     return f"{what} — 스탠스 `{stance}`는 진입 조건을 전제한다(비울 수 있는 것은 관망·보류)"
 
 
-def previous_ledger(root: Path) -> dict[str, dict[str, str]]:
-    """커밋된 원장(HEAD)의 행 — 브리프 파일명 → {열 이름: 칸}.
+def previous_ledger(root: Path) -> dict[str, dict]:
+    """커밋된 원장(HEAD)의 행 — 브리프 파일명 → {"cells": {열 이름: 칸}, "line": 원문, "section": 표}.
 
     작업 트리의 파일은 읽지 않는다. `> briefs/ledger.md`로 쓰면 셸이 파일을 먼저 비우기 때문이다.
     """
@@ -558,9 +584,12 @@ def previous_ledger(root: Path) -> dict[str, dict[str, str]]:
                               capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return {}
-    prev: dict[str, dict[str, str]] = {}
+    prev: dict[str, dict] = {}
     head: list[str] | None = None
+    section = ""
     for line in text.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip()
         if not line.startswith("|"):
             head = None
             continue
@@ -570,7 +599,7 @@ def previous_ledger(root: Path) -> dict[str, dict[str, str]]:
         elif head and not set(cells[0]) <= {"-"}:
             m = re.search(r"\(\./([^)]+)\)", line)
             if m:
-                prev[m.group(1)] = dict(zip(head, cells))
+                prev[m.group(1)] = {"cells": dict(zip(head, cells)), "line": line, "section": section}
     return prev
 
 
@@ -583,7 +612,7 @@ def regressions(results: list[dict], cells: dict[str, dict[str, str]], prev: dic
     out = []
     for res in results:
         stem = res["brief"]["path"].stem
-        old = prev.get(stem, {})
+        old = prev.get(stem, {}).get("cells", {})
         for col in LEVEL_COLS:
             m = re.search(r"✓ (\d{4}-\d{2}-\d{2})", old.get(col, ""))
             if m and f"✓ {m.group(1)}" not in cells[stem][col]:
@@ -598,6 +627,9 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
     live = [r for r in order if r["verdict"]["code"] not in ENDED and not r["closed_on"]]
     done = [r for r in order if r not in live]
     cells = {r["brief"]["path"].stem: ledger_cells(r, r in live) for r in order}
+    prev = previous_ledger(root)
+    # 판정하지 못한 브리프는 이전 원장의 행을 그대로 둔다 — 행이 사라지면 기록이 끊긴다.
+    carried = {p.stem: prev[p.stem] for p, _ in failures if p.stem in prev}
 
     out = ["---", "title: 조건 원장", "---", "",
            "# 조건 원장", "",
@@ -627,18 +659,25 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
 
     out += ["## 진행 중", "",
             "계획이 아직 끝나지 않은 브리프다. 관찰되지 않은 가격 옆의 %는 **최근 종가에서 그 가격까지 남은 거리**다.", ""]
-    if live:
+    def table(rs, with_last, section):
+        lines = [(r["brief"]["path"].stem, row(r, with_last)) for r in rs]
+        lines += [(stem, c["line"]) for stem, c in carried.items() if c["section"] == section]
+        return [line for _, line in sorted(lines, reverse=True)]
+
+    live_rows = table(live, True, "진행 중")
+    done_rows = table(done, False, "종료")
+    if live_rows:
         out += ["| 작성일 | 종목 | 기준 종가 | 최근 종가 | " + " | ".join(LEVEL_COLS) + " | 판정 | 추적 |",
                 "|---|---|---|---|---|---|---|---|---|---|"]
-        out += [row(r, True) for r in live]
+        out += live_rows
     else:
         out.append("진행 중인 브리프가 없다.")
     out += ["", "## 종료", "",
             "가격 무효화·전량 정리가 관찰됐거나 추적 창이 닫혀 계획이 끝난 브리프다.", ""]
-    if done:
+    if done_rows:
         out += ["| 작성일 | 종목 | 기준 종가 | " + " | ".join(LEVEL_COLS) + " | 판정 | 추적 |",
                 "|---|---|---|---|---|---|---|---|---|"]
-        out += [row(r, False) for r in done]
+        out += done_rows
     else:
         out.append("아직 종료된 브리프가 없다.")
 
@@ -652,7 +691,7 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
             f"**판정 집계** — 총 {len(results)}건 · "
             + " · ".join(f"{k} {v}건" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])), ""]
 
-    back = regressions(results, cells, previous_ledger(root))
+    back = regressions(results, cells, prev)
     if back:
         out += ["**이전 원장과 어긋난 판정** — 관찰된 종가는 되돌아가지 않는다. "
                 "원자료가 빠졌거나 소급 조정된 것이므로 원자료를 확인한다.", ""]
@@ -669,9 +708,16 @@ def emit_ledger(results: list[dict], failures: list[tuple[Path, str]], window_da
     if blanks:
         out += ["**원자료 종가 공란으로 판정에서 빠진 날**", ""]
         out += [f"- `{stem}` — {d}" for stem, d in blanks] + [""]
+    stale = [(r["brief"]["path"].stem, r["data"]["stale"]) for r in order if r["data"]["stale"]]
+    if stale:
+        out += ["**저장된 원자료로 판정한 브리프** — 다시 받지 못해 판정이 저장분의 마지막 봉까지다.", ""]
+        out += [f"- `{stem}` — {why}" for stem, why in stale] + [""]
+        for stem, why in stale:
+            print(f"[경고] 저장분으로 판정 — {stem}: {why}", file=sys.stderr)
     if failures:
-        out += ["**판정하지 못한 브리프**", ""]
-        out += [f"- `{p.name}` — {why}" for p, why in failures] + [""]
+        out += ["**판정하지 못한 브리프** — `이전 행 유지`는 커밋된 원장의 행을 그대로 둔 것이다(이번 실행의 판정이 아니다).", ""]
+        out += [f"- `{p.name}` — {why}" + (" · 이전 행 유지" if p.stem in carried else "")
+                for p, why in failures] + [""]
     out += ["---", "",
             f"*생성: {now:%Y-%m-%d %H:%M KST} · 추적 창은 기준 종가일 이후 "
             f"{'무제한' if window_days <= 0 else str(window_days) + '일'} · "

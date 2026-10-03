@@ -25,6 +25,10 @@
     그 판단이 재현 가능한 기록으로 남아야 한다.
     판정 기준: 일봉은 거래소 정규장 구간(`meta.currentTradingPeriod.regular`),
     주봉·월봉은 봉이 속한 기간이 끝났는지(직전 봉과 같은 기간이면 중복 봉으로 본다).
+    주봉은 거래소 현지 토·일이면 그 주가 끝난 것으로 본다.
+    **판정 시각은 계산한 시각이 아니라 원자료를 받은 시각이다** — `fetch_ohlcv.py`가 남긴
+    조회 기록(`<이름>.fetch.json`)에서 읽는다. 그래야 같은 파일을 언제 다시 넣어도 같은 봉이
+    빠지고 같은 값이 나온다. 기록이 없는 옛 파일은 계산 시각으로 판정하고 그 사실을 facts에 남긴다.
 
 지표 정의 (파라미터는 AGENTS.md가 고정한 값이다 — 종목마다 바꾸지 않는다)
     SMA          단순이동평균 20 / 60 / 120 / 200
@@ -58,6 +62,9 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fetch_ohlcv as F  # noqa: E402  — 조회 기록 경로·주 마감 판정을 한곳에 둔다
 
 KST = timezone(timedelta(hours=9))
 
@@ -119,7 +126,10 @@ def load(path: Path, price_field: str) -> dict:
 
     if len(bars) < 30:
         sys.exit(f"[실패] 유효 봉이 {len(bars)}개뿐이다 — 표본 부족이므로 지표를 만들지 않는다.")
-    return {"meta": meta, "bars": bars, "ex_tz": ex_tz}
+    fetched = F.fetched_at(path)
+    return {"meta": meta, "bars": bars, "ex_tz": ex_tz,
+            # 미확정 봉 판정의 기준 시각. 조회 기록이 없으면 계산 시각으로 대신한다.
+            "as_of": fetched or datetime.now(timezone.utc), "as_of_known": fetched is not None}
 
 
 def _at(seq, i):
@@ -154,13 +164,14 @@ def unconfirmed_reason(bars: list[dict], preset_key: str, meta: dict, ex_tz, now
     일봉은 거래소 정규장 구간으로 판정한다 — 날짜만 보면 장이 끝난 뒤의 확정 봉을
     미확정으로 오판한다(fetch_ohlcv.py와 같은 기준).
     """
-    today = datetime.now(ex_tz).strftime("%Y-%m-%d")
+    today_d = now_dt.astimezone(ex_tz).date()
+    today = today_d.isoformat()
 
     if preset_key == "weekly":
         last = _period(bars[-1]["date"], preset_key)
         if len(bars) >= 2 and last == _period(bars[-2]["date"], preset_key):
             return "직전 봉과 같은 주를 담은 중복 봉"
-        if last == _period(today, preset_key):
+        if last == _period(today, preset_key) and not F.week_closed(today_d):
             return "이번 주 진행 중인 봉"
         return None
 
@@ -512,12 +523,16 @@ def _between(c: dict) -> str:
     return "유효 클러스터 없음"
 
 
-def emit_facts(c: dict, preset: dict, args, src: Path, dropped: list[str]) -> str:
+def emit_facts(c: dict, preset: dict, args, src: Path, dropped: list[str], data: dict) -> str:
     bars, win = c["bars"], c["window_bars"]
     meta = c["meta"]
     unit = preset["unit"]
     adj = "수정주가(분할·배당 반영, adjclose 기준)" if args.price_field == "adjclose" else "분할 반영·배당 미반영(close 기준)"
-    now = datetime.now(KST).strftime("%Y-%m-%d")
+    if data["as_of_known"]:
+        now = data["as_of"].astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+    else:
+        now = (f"미상(조회 기록 {F.sidecar(src).name} 없음 — 미확정 봉 판정은 계산 시각 "
+               f"{data['as_of'].astimezone(KST):%Y-%m-%d %H:%M KST} 기준)")
     sh, sl = c["swing_counts"]
     flags = " --drop-unconfirmed" if args.drop_unconfirmed else ""
     drop_line = (
@@ -571,7 +586,10 @@ def main() -> None:
         args.tol = preset["tol"]
 
     data = load(args.path, args.price_field)
-    now_dt = datetime.now(timezone.utc)
+    now_dt = data["as_of"]
+    if not data["as_of_known"]:
+        print(f"[주의] 조회 기록({F.sidecar(args.path).name})이 없다 — 미확정 봉을 계산 시각으로 판정한다. "
+              "다시 계산하면 결과가 달라질 수 있으니 원자료를 fetch_ohlcv.py로 다시 받는다.", file=sys.stderr)
 
     dropped: list[str] = []
     if args.drop_unconfirmed:
@@ -607,7 +625,7 @@ def main() -> None:
     if args.emit == "all":
         print()
     if args.emit in ("all", "facts"):
-        print(emit_facts(c, preset, args, args.path, dropped))
+        print(emit_facts(c, preset, args, args.path, dropped, data))
 
 
 if __name__ == "__main__":

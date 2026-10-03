@@ -19,6 +19,11 @@
     되짚을 수 있어야 하기 때문이다. 표준 출력에는 검증용 요약(행 수, 기간, 마지막 종가,
     조회 시각)만 찍는다.
 
+    원자료 옆에 **조회 기록**(`<이름>.fetch.json` — 조회 시각·요청)을 함께 남긴다. 마지막 봉이
+    확정이었는지는 "받은 순간"에 정해지는 사실인데 응답 원문에는 그 시각이 없다. 계산 시각으로
+    판정하면 같은 파일을 다음 주에 다시 넣었을 때 판정이 바뀌어 값이 달라진다. 그래서
+    `technicals.py`는 이 기록의 시각으로 판정한다.
+
 수정주가 주의
     Yahoo 차트 API의 OHLC는 **주식분할은 반영, 배당은 미반영**이고,
     `adjclose`는 **분할·배당을 모두 반영**한 값이다. 어느 쪽으로 지표를 계산했는지는
@@ -26,12 +31,13 @@
 
 한계
     - 무료·비공식 엔드포인트다. 429(요청 과다)나 스키마 변경으로 언제든 깨질 수 있다.
+      429는 호스트마다 한 번 쉬었다가 다시 시도한다.
     - 상장폐지·티커 변경 종목은 빈 응답이 온다. 그때는 종목 코드부터 다시 확인한다.
     - 장중에 받으면 마지막 봉이 미완성이다. 일봉의 확정 여부는 **거래소의 정규장 시간**으로
       판정해 `[주의] 마지막 봉이 미확정이다`를 찍는다. 그 경고가 뜨면 보고서 기준일로 쓰지 않는다.
       (날짜 비교로는 미국 장이 KST 자정을 넘겨 열려 있는 00:00~05:00을 놓친다.)
     - `1wk`/`1mo`는 **장이 닫혀 있어도** 진행 중인 주·달의 봉이 미완성이므로 정규장 시간이 아니라
-      봉이 속한 기간으로 판정한다. 게다가 Yahoo는 진행 중인 기간의 봉을 하나 더 덧붙여
+      봉이 속한 기간으로 판정한다. 주봉은 거래소 현지 토·일이면 그 주가 끝난 것으로 본다. 게다가 Yahoo는 진행 중인 기간의 봉을 하나 더 덧붙여
       같은 주를 두 번 담아 보내는 일이 있다 — 그 중복은 `technicals.py --drop-unconfirmed`가 뺀다.
       **원자료 JSON을 손으로 잘라내지 않는다.**
 """
@@ -41,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -54,6 +61,9 @@ CHART_PATH = "/v8/finance/chart/{ticker}"
 UA = "Mozilla/5.0"
 KST = timezone(timedelta(hours=9))
 
+# 429일 때 같은 호스트를 다시 시도하기 전에 쉬는 초.
+RETRY_WAIT = 3.0
+
 RANGES = ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
 INTERVALS = ["1d", "1wk", "1mo"]
 
@@ -62,20 +72,34 @@ def fetch(ticker: str, rng: str, interval: str) -> dict:
     query = f"?range={rng}&interval={interval}&events=div%2Csplit"
     payload = None
     errors = []
+    stop = False
     for host in CHART_HOSTS:
         url = host + CHART_PATH.format(ticker=ticker) + query
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = resp.read().decode("utf-8", "replace")
+                payload = json.loads(body)
+                break
+            except json.JSONDecodeError:
+                # 차단 페이지(HTML)가 200으로 오는 일이 있다. 트레이스백 대신 사유를 남긴다.
+                errors.append(f"{host} → JSON이 아닌 응답: {body[:120]!r}")
+                break
+            except urllib.error.HTTPError as e:
+                errors.append(f"{host} → HTTP {e.code} {e.read().decode('utf-8', 'replace')[:200]}")
+                if e.code == 404:
+                    stop = True  # 티커 문제라 다른 호스트도 같다
+                    break
+                if e.code == 429 and attempt == 1:
+                    time.sleep(RETRY_WAIT)
+                    continue
+                break
+            except urllib.error.URLError as e:
+                errors.append(f"{host} → {e.reason}")
+                break
+        if payload is not None or stop:
             break
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace")[:200]
-            errors.append(f"{host} → HTTP {e.code} {body}")
-            if e.code == 404:
-                break  # 티커 문제라 다른 호스트도 같다
-        except urllib.error.URLError as e:
-            errors.append(f"{host} → {e.reason}")
     if payload is None:
         sys.exit("[실패] 원자료를 받지 못했다:\n  " + "\n  ".join(errors)
                  + "\n(429면 잠시 뒤 재시도, 404면 티커 표기(.KS/.KQ)를 확인한다)")
@@ -87,6 +111,36 @@ def fetch(ticker: str, rng: str, interval: str) -> dict:
     if not results:
         sys.exit("[실패] 결과가 비어 있다 — 티커 표기(.KS/.KQ 포함)를 확인한다.")
     return payload
+
+
+def sidecar(out: Path) -> Path:
+    """원자료 옆의 조회 기록 경로 — `X-1d.json` → `X-1d.fetch.json`."""
+    return out.with_name(out.stem + ".fetch.json")
+
+
+def save(payload: dict, out: Path, ticker: str, rng: str, interval: str) -> datetime:
+    """원자료를 원문 그대로 저장하고, 조회 시각을 옆 파일에 남긴다. 조회 시각을 돌려준다."""
+    now = datetime.now(timezone.utc)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    sidecar(out).write_text(json.dumps({
+        "fetched_at": now.isoformat(timespec="seconds"),
+        "ticker": ticker, "range": rng, "interval": interval,
+    }, ensure_ascii=False), encoding="utf-8")
+    return now
+
+
+def fetched_at(out: Path) -> datetime | None:
+    """조회 기록의 시각. 기록이 없거나 읽지 못하면 None — 호출자가 그 사실을 남긴다."""
+    try:
+        return datetime.fromisoformat(json.loads(sidecar(out).read_text(encoding="utf-8"))["fetched_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def week_closed(day) -> bool:
+    """거래소 현지 날짜가 토·일이면 그 주의 거래는 끝났다."""
+    return day.weekday() >= 5
 
 
 def summarize(payload: dict) -> dict:
@@ -143,10 +197,11 @@ def unconfirmed_reason(s: dict, interval: str, now_epoch: float) -> str | None:
     봉이 속한 기간이 아직 끝나지 않았는지를 거래소 현지 날짜로 본다.
     """
     last_local = datetime.fromtimestamp(s["last_ts"], timezone.utc).astimezone(s["ex_tz"]).date()
-    today_local = datetime.now(s["ex_tz"]).date()
+    today_local = datetime.fromtimestamp(now_epoch, timezone.utc).astimezone(s["ex_tz"]).date()
 
     if interval == "1wk":
-        return "이번 주 진행 중인 봉" if last_local.isocalendar()[:2] == today_local.isocalendar()[:2] else None
+        same_week = last_local.isocalendar()[:2] == today_local.isocalendar()[:2]
+        return "이번 주 진행 중인 봉" if same_week and not week_closed(today_local) else None
     if interval == "1mo":
         return "이번 달 진행 중인 봉" if (last_local.year, last_local.month) == (today_local.year, today_local.month) else None
 
@@ -173,13 +228,10 @@ def main() -> None:
     payload = fetch(args.ticker, args.rng, args.interval)
     s = summarize(payload)
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    now_dt = datetime.now(timezone.utc)
+    now_dt = save(payload, out, args.ticker, args.rng, args.interval)
     now = (f"{now_dt.astimezone(KST):%Y-%m-%d %H:%M KST}"
            f" (거래소 현지 {now_dt.astimezone(s['ex_tz']):%Y-%m-%d %H:%M})")
-    print(f"저장: {out}")
+    print(f"저장: {out} (조회 기록 {sidecar(out).name})")
     print(f"종목: {s['symbol']} · {s['exchange']} · {s['currency']} · 거래소 시간대 {s['timezone']}")
     print(f"구간: {s['first']} ~ {s['last']} ({args.interval}, {s['rows']}봉, 결측 {s['null_rows']}봉)")
     print(f"마지막 봉 종가: {s['last_close']}")

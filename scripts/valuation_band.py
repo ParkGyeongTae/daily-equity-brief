@@ -82,8 +82,8 @@ def load_denominator(path: Path) -> dict:
         except ValueError:
             sys.exit(f"[실패] series[{i}] effective가 YYYY-MM-DD가 아니다: {r['effective']}")
         val = float(r["value"])
-        if val == 0:
-            sys.exit(f"[실패] series[{i}] value가 0이다 — 배수를 만들 수 없다. "
+        if val <= 0:
+            sys.exit(f"[실패] series[{i}] value가 {val:g}이다 — 0 이하인 분모로는 배수를 만들 수 없다. "
                      "적자 구간이면 그 방법론을 쓰지 않고 사유를 6절에 적는다.")
         rows.append({"effective": eff, "value": val, "source": str(r["source"])})
 
@@ -106,12 +106,12 @@ def splits_in_range(payload_path: Path, first: str, last: str, ex_tz) -> list[st
     return sorted(found)
 
 
-def effective_at(rows: list[dict], day: str) -> dict | None:
-    """그 날 알 수 있었던 가장 최근 분모. 계단식 — 미래 값을 쓰지 않는다."""
+def effective_at(rows: list[dict], day: str) -> int | None:
+    """그 날 알 수 있었던 가장 최근 분모의 행 번호. 계단식 — 미래 값을 쓰지 않는다."""
     picked = None
-    for r in rows:
+    for i, r in enumerate(rows):
         if r["effective"] <= day:
-            picked = r
+            picked = i
         else:
             break
     return picked
@@ -133,13 +133,16 @@ def compute(denom: dict, data: dict, src: Path, allow_split: bool) -> dict:
     rows = denom["series"]
     first_eff = rows[0]["effective"]
 
+    # 분모는 값이 아니라 **행 번호**로 구간을 가른다. 연달아 나온 두 공시의 값이 같으면
+    # 값으로는 두 구간을 구분할 수 없어 직전 분모와 구간 표가 틀어진다.
     used, skipped = [], 0
     for b in bars:
-        r = effective_at(rows, b["date"])
-        if r is None:
+        idx = effective_at(rows, b["date"])
+        if idx is None:
             skipped += 1
             continue
-        used.append({"date": b["date"], "close": b["close"],
+        r = rows[idx]
+        used.append({"date": b["date"], "close": b["close"], "row": idx,
                      "denom": r["value"], "multiple": b["close"] / r["value"]})
 
     if len(used) < 30:
@@ -161,19 +164,16 @@ def compute(denom: dict, data: dict, src: Path, allow_split: bool) -> dict:
     # 분모가 방금 교체됐으면 배수 하락의 상당 부분이 **가격이 아니라 분모** 때문이다.
     # 그 구분을 안 하면 "싸졌다"로 잘못 읽힌다.
     prior = None
-    cur_rows = [r for r in rows if r["value"] == cur["denom"]]
-    cur_eff = cur_rows[0]["effective"] if cur_rows else None
-    if cur_eff:
-        earlier = [r for r in rows if r["effective"] < cur_eff]
-        if earlier:
-            pv = earlier[-1]["value"]
-            pm = cur["close"] / pv
-            prior = {"value": pv, "multiple": pm, "source": earlier[-1]["source"],
-                     "percentile": sum(1 for m in ms if m <= pm) / len(ms) * 100}
+    if cur["row"] > 0:
+        before = rows[cur["row"] - 1]
+        pv = before["value"]
+        pm = cur["close"] / pv
+        prior = {"value": pv, "multiple": pm, "source": before["source"],
+                 "percentile": sum(1 for m in ms if m <= pm) / len(ms) * 100}
 
     segments = []
-    for r in rows:
-        seg = [u for u in used if u["denom"] == r["value"]]
+    for idx, r in enumerate(rows):
+        seg = [u for u in used if u["row"] == idx]
         if seg:
             segments.append({"source": r["source"], "effective": r["effective"], "value": r["value"],
                              "first": seg[0]["date"], "last": seg[-1]["date"], "bars": len(seg),
@@ -214,7 +214,8 @@ def emit_table(c: dict) -> str:
             f"**{c['percentile']:.1f}분위**다{extreme} (그 값 이하인 거래일의 비율).",
             f"계산식: {fmt(cur['close'])} ÷ {cur['denom']:,.2f} = {cur['multiple']:,.2f}배."]
     last_seg = c["segments"][-1] if c["segments"] else None
-    if c["prior"] and last_seg and last_seg["bars"] < 20:
+    # 분모가 커졌을 때만 쓴다 — 같거나 작아졌으면 "분모 때문에 싸 보인다"는 경고가 성립하지 않는다.
+    if c["prior"] and last_seg and last_seg["bars"] < 20 and c["prior"]["value"] < cur["denom"]:
         pr = c["prior"]
         out += ["",
                 f"**분모가 {last_seg['bars']}거래일 전에 교체됐다.** 같은 종가 {fmt(cur['close'])}를 "
@@ -260,7 +261,7 @@ def main() -> None:
 
     denom = load_denominator(args.denominator)
     data = T.load(args.price, args.price_field)
-    data["dropped"] = T.drop_unconfirmed(data, "daily", datetime.now(timezone.utc))
+    data["dropped"] = T.drop_unconfirmed(data, "daily", data["as_of"])
     for d in data["dropped"]:
         print(f"[제외] 미확정 봉을 계산에서 뺐다 — {d}", file=sys.stderr)
 
