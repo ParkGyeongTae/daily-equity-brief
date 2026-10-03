@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 
 FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)\.md$")
+# briefs/ 안에 있지만 브리프가 아닌 사이트 페이지 — 목록(index)과 조건 원장(ledger).
+SITE_PAGES = {"index.md", "ledger.md"}
 H1_RE = re.compile(r"^#\s+(.+?)\s*\((.+?)\)\s*—\s*(\d{4}-\d{2}-\d{2})\s*$")
 QUOTE_RE = re.compile(r"^>\s*한 줄 요약\s*[:：]\s*(.+)$")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
@@ -606,9 +608,9 @@ def main() -> int:
             print(f"✗ {path} — 파일이 없다")
             failed = True
             continue
-        # briefs/*.md 로 부르면 목록 페이지까지 잡힌다. 사이트 파서(.vitepress/briefs.mjs)도
-        # index.md 를 브리프로 보지 않으므로 여기서도 조용히 넘긴다.
-        if path.name == "index.md":
+        # briefs/*.md 로 부르면 목록 페이지와 조건 원장까지 잡힌다. 사이트 파서(.vitepress/briefs.mjs)도
+        # 둘을 브리프로 보지 않으므로 여기서도 조용히 넘긴다.
+        if path.name in SITE_PAGES:
             continue
         rep = validate(path)
         for line, msg in sorted(rep.errors):

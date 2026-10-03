@@ -26,6 +26,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # 커밋 훅은 에이전트 세션에서만 돈다. 훅을 거치지 않은 커밋도 형식이 깨진 채 공개되지 않게
+      # 배포 전에 한 번 더 막는다. 표준 라이브러리만 쓰므로 러너의 python3로 충분하다.
+      - name: Validate briefs
+        run: python3 scripts/validate_brief.py briefs/*.md
       - name: Install dependencies
         run: npm ci
       - name: Build
