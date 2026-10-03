@@ -243,16 +243,30 @@ def check_sections(rep: Report, sections: list[dict]) -> None:
 
 
 def check_prose(rep: Report, lines: list[str]) -> None:
+    """금지 표현은 **작성자가 쓴 문장**에만 건다.
+
+    빼는 것은 둘이다 — `(선정 계기)` 출처 줄(기사 제목은 남이 쓴 인용이라 고칠 수 없다.
+    "…수혜 전망이다" 같은 제목이 선정 계기가 되면 본문이 멀쩡해도 커밋이 막혔다)과
+    코드 블록(명령·출력 원문). 자리표시자 검사는 그대로 전부 본다.
+    """
+    fence: str | None = None
     for i, raw in enumerate(lines, start=1):
         if raw.lstrip().startswith("<!--"):
+            continue
+        m = FENCE_RE.match(raw)
+        if m:
+            marker = m.group(1)[0]
+            fence = marker if fence is None else (None if marker == fence else fence)
+        quoted = fence is not None or m is not None or "(선정 계기)" in raw
+        for pat in PLACEHOLDERS:
+            if re.search(pat, raw):
+                rep.err(i, f"템플릿 자리표시자가 남아 있다 — {pat}")
+        if quoted:
             continue
         for pat, label in BANNED:
             m = re.search(pat, raw)
             if m:
                 rep.err(i, f"{label} 금지 — \"{m.group(0)}\" (조건문으로 바꾸거나 지운다)")
-        for pat in PLACEHOLDERS:
-            if re.search(pat, raw):
-                rep.err(i, f"템플릿 자리표시자가 남아 있다 — {pat}")
 
     text = "\n".join(lines)
     if "투자 권유가 아닙니다" not in text:

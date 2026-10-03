@@ -30,6 +30,9 @@ jobs:
       # 배포 전에 한 번 더 막는다. 표준 라이브러리만 쓰므로 러너의 python3로 충분하다.
       - name: Validate briefs
         run: python3 scripts/validate_brief.py briefs/*.md
+      # 고쳤던 스크립트 버그가 되살아나지 않는지 본다. 네트워크를 쓰지 않는다.
+      - name: Regression tests
+        run: python3 -m unittest discover -s tests -v
       - name: Install dependencies
         run: npm ci
       - name: Build

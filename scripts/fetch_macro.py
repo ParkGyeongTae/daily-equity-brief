@@ -52,7 +52,10 @@ API 키
       증감률은 저장된 원자료에서 이 스크립트가 계산한다 — 남이 계산한 값을 받아 쓰지 않는
       이 저장소의 규칙(AGENTS.md "5단계")은 거시에도 같이 적용된다.
     - 발표 지연이 있다. 일별 계열도 07:00 KST 실행 시점엔 1~3영업일 전이 최신이고,
-      월별 계열은 한 달 이상 밀린다. 요약의 `[주의] 최신 관측이 N일 전`을 보고 판단한다.
+      월별 계열은 한 달 이상 밀린다. 그래서 지연은 **관측 기간이 끝난 날부터** 재고(월별 8월분은
+      8/31부터), 주기별로 정상 범위를 넘을 때만 `[주의] 발표 지연`을 찍는다
+      (일 7일 · 월 45일 · 분기 100일 · 연 200일). 정상 범위 안이면 경고하지 않는다.
+    - 날짜는 전부 KST다(`--end` 기본값 포함). 실행 환경의 시간대가 UTC여도 같은 날짜가 나온다.
     - ECOS 주기별 날짜 형식은 D=YYYYMMDD, M=YYYYMM, Q=YYYYQ1, A=YYYY다.
       `--start/--end`에 `YYYY-MM-DD`를 주면 주기에 맞춰 변환하고, 그 밖의 주기(SM 등)는
       변환하지 않으므로 해당 주기의 형식 그대로 넘긴다.
@@ -272,6 +275,41 @@ def norm_day(t: str) -> date | None:
         return None
 
 
+def period_of(t: str) -> str:
+    """관측 시점 문자열의 주기 — D/M/Q/A. norm_day와 같은 길이 규칙을 쓴다."""
+    if len(t) == 10 or len(t) == 8:
+        return "D"
+    if len(t) == 6 and t[4].upper() == "Q":
+        return "Q"
+    if len(t) == 6:
+        return "M"
+    return "A"
+
+
+def period_end(start: date, period: str) -> date:
+    """그 관측 기간의 마지막 날. 월·분기·연 계열은 첫날로 적혀 있어 그대로 재면 지연이 부풀려진다."""
+    if period == "D":
+        return start
+    months = {"M": 1, "Q": 3, "A": 12}[period]
+    y, m = divmod(start.month - 1 + months, 12)
+    return date(start.year + y, m + 1, 1) - timedelta(days=1)
+
+
+# 주기별 정상 발표 지연 상한(관측 기간 끝 → 오늘, 일). 넘으면 발표가 밀린 것으로 본다.
+LAG_LIMIT = {"D": 7, "M": 45, "Q": 100, "A": 200}
+# 주기별 비교 시점. 분기 계열에 "1개월 전"을 쓰면 직전 분기를 1개월 전이라 부르게 된다.
+COMPARE = {
+    "D": (("1개월 전", 30), ("3개월 전", 91), ("1년 전", 365)),
+    "M": (("1개월 전", 30), ("3개월 전", 91), ("1년 전", 365)),
+    "Q": (("1분기 전", 91), ("1년 전", 365)),
+    "A": (("1년 전", 365),),
+}
+
+
+def today_kst() -> date:
+    return datetime.now(KST).date()
+
+
 def pct(new: float, old: float) -> str:
     return f"{(new - old) / abs(old) * 100:+.2f}%" if old else "계산 불가(기준값 0)"
 
@@ -290,8 +328,9 @@ def report(env: dict) -> None:
 
     # 변화 — 저장된 원자료에서 직접 계산한다. API가 계산해 준 값을 받지 않는다.
     lastd = norm_day(last_t)
+    period = period_of(last_t)
     if lastd:
-        for label, days in (("1개월 전", 30), ("3개월 전", 91), ("1년 전", 365)):
+        for label, days in COMPARE[period]:
             target = lastd - timedelta(days=days)
             prior = [(t, v) for t, v in pts[:-1] if (d := norm_day(t)) and d <= target]
             if prior:
@@ -313,9 +352,13 @@ def report(env: dict) -> None:
         print("[주의] 이 출처는 개정 이력(vintage)을 주지 않는다 — 조회일만이 단서다.")
     print(f"조회 시각: {env['fetched_at_kst']}")
 
-    if lastd and (lag := (datetime.now(KST).date() - lastd).days) > 7:
-        print(f"[주의] 최신 관측이 {lag}일 전({last_t})이다 — 발표 지연이다. "
-              "보고서에는 조회일이 아니라 **관측일**을 기준으로 적는다.")
+    if lastd:
+        end = period_end(lastd, period)
+        lag = (today_kst() - end).days
+        if lag > LAG_LIMIT[period]:
+            print(f"[주의] 발표 지연 — 최신 관측({last_t})의 기간이 끝난 지 {lag}일이다"
+                  f"(주기 {period}의 정상 범위 {LAG_LIMIT[period]}일 초과). "
+                  "보고서에는 조회일이 아니라 **관측일**을 기준으로 적는다.")
     print("\n보고서 표기: 값 · 관측일 · 조회일 · 출처(시리즈 ID)를 함께 적는다. "
           "이 값은 나중에 개정될 수 있다.")
 
@@ -326,9 +369,9 @@ def main() -> None:
     ap.add_argument("series", nargs="?", help="FRED: 시리즈 ID · ECOS: 통계표/주기/항목")
     ap.add_argument("--find", metavar="Q", help="코드 찾기 (파일을 만들지 않는다)")
     ap.add_argument("--from-file", metavar="PATH", help="저장된 원자료에서 다시 계산 (네트워크 없음)")
-    ap.add_argument("--start", default=(date.today() - timedelta(days=365 * 3)).isoformat(),
-                    help="YYYY-MM-DD (기본 3년 전)")
-    ap.add_argument("--end", default=date.today().isoformat(), help="YYYY-MM-DD (기본 오늘)")
+    ap.add_argument("--start", default=(today_kst() - timedelta(days=365 * 3)).isoformat(),
+                    help="YYYY-MM-DD (기본 KST 3년 전)")
+    ap.add_argument("--end", default=today_kst().isoformat(), help="YYYY-MM-DD (기본 KST 오늘)")
     ap.add_argument("--rows", type=int, default=10000, help="ECOS 최대 행 수 (기본 10000)")
     ap.add_argument("-o", "--out", help="저장 경로 (스크래치패드 권장)")
     ap.add_argument("--force", action="store_true", help="기존 파일 덮어쓰기")
@@ -338,6 +381,10 @@ def main() -> None:
 
     if args.from_file:
         env = json.loads(Path(args.from_file).expanduser().read_text(encoding="utf-8"))
+        # 파일이 어느 출처의 원자료인지는 파일이 안다. 명령의 provider와 다르면 트레이스백 대신 멈춘다.
+        if env.get("provider") and env["provider"] != args.provider:
+            sys.exit(f"[중단] {args.from_file}은 {env['provider']} 원자료다 — "
+                     f"`fetch_macro.py {env['provider']} --from-file …`로 다시 부른다.")
         env["extract"] = extract(env["raw"])
         print(f"원자료: {args.from_file}")
         report(env)

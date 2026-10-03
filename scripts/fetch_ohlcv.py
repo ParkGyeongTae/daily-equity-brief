@@ -36,10 +36,12 @@
     - 장중에 받으면 마지막 봉이 미완성이다. 일봉의 확정 여부는 **거래소의 정규장 시간**으로
       판정해 `[주의] 마지막 봉이 미확정이다`를 찍는다. 그 경고가 뜨면 보고서 기준일로 쓰지 않는다.
       (날짜 비교로는 미국 장이 KST 자정을 넘겨 열려 있는 00:00~05:00을 놓친다.)
-    - `1wk`/`1mo`는 **장이 닫혀 있어도** 진행 중인 주·달의 봉이 미완성이므로 정규장 시간이 아니라
-      봉이 속한 기간으로 판정한다. 주봉은 거래소 현지 토·일이면 그 주가 끝난 것으로 본다. 게다가 Yahoo는 진행 중인 기간의 봉을 하나 더 덧붙여
-      같은 주를 두 번 담아 보내는 일이 있다 — 그 중복은 `technicals.py --drop-unconfirmed`가 뺀다.
+    - `1wk`는 **장이 닫혀 있어도** 진행 중인 주의 봉이 미완성이므로 정규장 시간이 아니라
+      봉이 속한 주로 판정한다. 거래소 현지 토·일이면 그 주가 끝난 것으로 본다.
+      게다가 Yahoo는 진행 중인 주의 봉을 하나 더 덧붙여 같은 주를 두 번 담아 보내는 일이 있다 — 그 중복은 `technicals.py --drop-unconfirmed`가 뺀다.
       **원자료 JSON을 손으로 잘라내지 않는다.**
+    - 월봉(`1mo`)은 받지 않는다. `technicals.py`에 월봉 프리셋이 없어 받아도 계산할 수 없고,
+      스킬도 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ KST = timezone(timedelta(hours=9))
 RETRY_WAIT = 3.0
 
 RANGES = ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
-INTERVALS = ["1d", "1wk", "1mo"]
+INTERVALS = ["1d", "1wk"]
 
 
 def fetch(ticker: str, rng: str, interval: str) -> dict:
@@ -192,9 +194,9 @@ def unconfirmed_reason(s: dict, interval: str, now_epoch: float) -> str | None:
     거래소 날짜와 KST 날짜를 비교하는 방식은 미국 장이 KST 자정을 넘겨 열려 있는
     00:00~05:00에서 장중인데도 '어제 봉'으로 보여 경고를 놓쳤다.
 
-    주봉·월봉은 **장이 닫혀 있어도** 진행 중인 주·달의 봉이 미확정이므로 정규장 구간으로
+    주봉은 **장이 닫혀 있어도** 진행 중인 주의 봉이 미확정이므로 정규장 구간으로
     판정하면 안 된다(그렇게 하면 장 마감 후 받은 진행 중 주봉을 확정으로 오판한다).
-    봉이 속한 기간이 아직 끝나지 않았는지를 거래소 현지 날짜로 본다.
+    봉이 속한 주가 아직 끝나지 않았는지를 거래소 현지 날짜로 본다.
     """
     last_local = datetime.fromtimestamp(s["last_ts"], timezone.utc).astimezone(s["ex_tz"]).date()
     today_local = datetime.fromtimestamp(now_epoch, timezone.utc).astimezone(s["ex_tz"]).date()
@@ -202,8 +204,6 @@ def unconfirmed_reason(s: dict, interval: str, now_epoch: float) -> str | None:
     if interval == "1wk":
         same_week = last_local.isocalendar()[:2] == today_local.isocalendar()[:2]
         return "이번 주 진행 중인 봉" if same_week and not week_closed(today_local) else None
-    if interval == "1mo":
-        return "이번 달 진행 중인 봉" if (last_local.year, last_local.month) == (today_local.year, today_local.month) else None
 
     start, end = s["session"]
     if not start <= now_epoch < end:
@@ -237,7 +237,7 @@ def main() -> None:
     print(f"마지막 봉 종가: {s['last_close']}")
     print(f"adjclose 포함: {'예' if s['has_adjclose'] else '아니오'}  (OHLC는 분할 반영·배당 미반영)")
     print(f"조회 시각: {now}")
-    # 주봉·월봉은 기간으로 판정하므로 정규장 시간이 없어도 된다. 일봉만 그 정보가 필요하다.
+    # 주봉은 기간으로 판정하므로 정규장 시간이 없어도 된다. 일봉만 그 정보가 필요하다.
     if args.interval == "1d" and s["session"] is None:
         print("[주의] 응답에 정규장 시간이 없어 마지막 봉의 확정 여부를 판정하지 못했다 — 직접 확인한다.")
     elif (reason := unconfirmed_reason(s, args.interval, now_dt.timestamp())) is not None:

@@ -19,12 +19,12 @@
 
 미확정 봉
     마지막 봉이 아직 확정되지 않았으면 경고를 찍는다. `--drop-unconfirmed`를 주면 그 봉을
-    **계산에서 제외하고 제외 사실을 `--emit facts`에 남긴다.** 주봉·월봉은 장이 닫혀 있어도
-    진행 중인 주·달의 봉이 미확정이므로 이 옵션을 기본으로 쓴다.
+    **계산에서 제외하고 제외 사실을 `--emit facts`에 남긴다.** 주봉은 장이 닫혀 있어도
+    진행 중인 주의 봉이 미확정이므로 이 옵션을 기본으로 쓴다.
     **원자료 JSON을 편집해 봉을 잘라내지 않는다** — 자르는 판단은 이 스크립트가 하고,
     그 판단이 재현 가능한 기록으로 남아야 한다.
     판정 기준: 일봉은 거래소 정규장 구간(`meta.currentTradingPeriod.regular`),
-    주봉·월봉은 봉이 속한 기간이 끝났는지(직전 봉과 같은 기간이면 중복 봉으로 본다).
+    주봉은 봉이 속한 주가 끝났는지(직전 봉과 같은 기간이면 중복 봉으로 본다).
     주봉은 거래소 현지 토·일이면 그 주가 끝난 것으로 본다.
     **판정 시각은 계산한 시각이 아니라 원자료를 받은 시각이다** — `fetch_ohlcv.py`가 남긴
     조회 기록(`<이름>.fetch.json`)에서 읽는다. 그래야 같은 파일을 언제 다시 넣어도 같은 봉이
@@ -160,7 +160,7 @@ def _period(date_str: str, preset_key: str):
 def unconfirmed_reason(bars: list[dict], preset_key: str, meta: dict, ex_tz, now_dt: datetime) -> str | None:
     """마지막 봉이 아직 확정되지 않았으면 사유를, 확정이면 None을 돌려준다.
 
-    주봉·월봉은 **장이 닫혀 있어도** 진행 중인 주·달의 봉이 미확정이므로 기간으로 판정한다.
+    주봉은 **장이 닫혀 있어도** 진행 중인 주의 봉이 미확정이므로 기간으로 판정한다.
     일봉은 거래소 정규장 구간으로 판정한다 — 날짜만 보면 장이 끝난 뒤의 확정 봉을
     미확정으로 오판한다(fetch_ohlcv.py와 같은 기준).
     """
@@ -575,7 +575,7 @@ def main() -> None:
                     help="현재가에서 이 비율을 넘게 떨어진 레벨은 원거리로 표시 (기본 0.25)")
     ap.add_argument("--price-field", choices=["close", "adjclose"], default="close")
     ap.add_argument("--drop-unconfirmed", action="store_true",
-                    help="미확정 봉을 계산에서 제외하고 제외 사실을 facts에 남긴다 (주봉·월봉 권장)")
+                    help="미확정 봉을 계산에서 제외하고 제외 사실을 facts에 남긴다 (주봉은 필수, 일봉도 기본)")
     ap.add_argument("--emit", choices=["all", "table", "levels", "facts", "json"], default="all")
     args = ap.parse_args()
 
