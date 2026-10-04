@@ -89,6 +89,7 @@
 | 도구 | 언제 쓰는가 | 마스터 문서 |
 |---|---|---|
 | `scripts/fetch_ohlcv.py` | 가격 원자료 수집 (키 불필요) | 스크립트 docstring (`--help`) |
+| `scripts/screen_candidates.py` | 접수 목록에서 거른 회사를 거래대금으로 자르고 정해진 순서로 세워 후보 5개를 고른다 (2단계) | 스크립트 docstring (`--help`) |
 | `scripts/technicals.py` | 저장된 원자료에서 지표·지지/저항 계산 (미확정 봉은 `--drop-unconfirmed`) | 스크립트 docstring (`--help`) |
 | `scripts/valuation_band.py` | 공시 분모 + 가격 원자료로 자기 이력 배수 밴드·분위 계산 (6절 기준점) | 스크립트 docstring (`--help`) |
 | `scripts/fetch_macro.py` | 거시 원계열 수집·계산 (FRED/ECOS). **게이트를 통과할 때만** | 스크립트 docstring (`--help`) |

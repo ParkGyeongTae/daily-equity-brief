@@ -150,37 +150,92 @@ python3 scripts/check_open_conditions.py --emit ledger > briefs/ledger.md
 (`fetch_macro.py`가 쓰는 우선순위와 같다). `.env`는 `SEC_USER_AGENT` 값에 공백이 있어
 **셸로 `source` 할 수 없으므로**(`set -a; . ./.env`는 "command not found"로 죽는다) 필요한 값만 꺼낸다.
 
+두 명령 모두 **접수 목록 전체를 페이지 끝까지 받아 유형으로 거르고**, 회사당 한 줄의 후보 TSV
+(`$SCRATCH/cand.tsv`)를 만든다. 첫 줄 주석에 전체 건수와 통과 건수가 찍힌다. `$SCRATCH`는 4단계의
+정의를 먼저 실행해 잡는다. 유형 목록은 아래 "후보 추리기"가 마스터다.
+
 ```bash
-# 미국 — EDGAR 전문검색. 실적 발표(8-K Item 2.02) 최근 3일. UA 없으면 403이다.
+# 미국 — EDGAR 전문검색, 최근 3일. 8-K의 items 필드로 거른다(본문에 문구만 나온 공시는 버린다).
+# UA 없으면 403이다. 100건씩 from= 으로 끝까지 받는다.
 UA="${SEC_USER_AGENT:-$(grep -E '^SEC_USER_AGENT=' .env 2>/dev/null | cut -d= -f2-)}"
 FROM=$(TZ=Asia/Seoul date -v-2d +%F 2>/dev/null || TZ=Asia/Seoul date -d '2 days ago' +%F)
-curl -s -H "User-Agent: $UA" \
-  "https://efts.sec.gov/LATEST/search-index?q=%22Item%202.02%22&forms=8-K&startdt=$FROM&enddt=$(TZ=Asia/Seoul date +%F)" \
-  | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-print("총", d["hits"]["total"]["value"], "건")
-for h in d["hits"]["hits"]:
-    s=h["_source"]; print(s.get("file_date"), "|", (s.get("display_names") or ["?"])[0])'
+TO=$(TZ=Asia/Seoul date +%F)
+UA="$UA" FROM="$FROM" TO="$TO" python3 - <<'PY' > "$SCRATCH/cand.tsv"
+import json, os, re, time, urllib.request
+ITEMS = ("2.02", "2.01", "1.01")   # 실적 · 인수/매각 완료 · 중요 계약 (screen_candidates.py의 순위와 같다)
+rows, seen, noticker = {}, 0, 0
+for item in ITEMS:
+    start = 0
+    while True:
+        url = ("https://efts.sec.gov/LATEST/search-index?q=%22Item%20{i}%22&forms=8-K"
+               "&startdt={FROM}&enddt={TO}&from={s}").format(i=item, s=start, **os.environ)
+        req = urllib.request.Request(url, headers={"User-Agent": os.environ["UA"]})
+        hits = json.load(urllib.request.urlopen(req, timeout=30))["hits"]["hits"]
+        for h in hits:
+            s = h["_source"]; seen += 1
+            if item not in (s.get("items") or []):
+                continue
+            m = re.search(r"\(([A-Z][A-Z0-9.\-]*)(?:,[^)]*)?\)\s+\(CIK", (s.get("display_names") or [""])[0])
+            if not m:
+                noticker += 1; continue
+            t = m.group(1).replace(".", "-")
+            if t not in rows:
+                rows[t] = {"kind": f"8-K {item}", "filed": s.get("file_date", ""), "memo": s["display_names"][0].split("  (")[0]}
+            elif item not in rows[t]["kind"]:
+                rows[t]["kind"] += f"·{item}"
+        if len(hits) < 100:
+            break
+        start += 100
+        time.sleep(0.2)
+print(f"# EDGAR 8-K {os.environ['FROM']}~{os.environ['TO']} Item {'/'.join(ITEMS)} 검색 {seen}건 → {len(rows)}개사 (티커 없는 제출자 {noticker}건 제외)")
+for t, r in rows.items():
+    print(f"{t}\t{r['kind']}\t\t{r['filed']}\t{r['memo']}")
+PY
+head -1 "$SCRATCH/cand.tsv"
 ```
 
 ```bash
-# 한국 — DART 접수 목록. pblntf_ty B=주요사항보고 I=거래소 수시공시(영업실적 공정공시·단일판매공급계약이 여기다).
-# corp_cls Y=유가증권 K=코스닥. API는 한 번에 한 값만 받으므로 네 조합을 돈다 — 하나만 받으면
-# 한국 실적 공시(I)와 코스닥(K)이 통째로 빠진다.
+# 한국 — DART 접수 목록, 최근 3일. pblntf_ty B=주요사항보고 I=거래소 수시공시 × corp_cls Y=유가 K=코스닥.
+# API는 한 번에 한 값만 받으므로 네 조합을 돌고, 조합마다 total_page 끝까지 받는다.
 K="${DART_API_KEY:-$(grep -E '^DART_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}"
 BGN=$(TZ=Asia/Seoul date -v-2d +%Y%m%d 2>/dev/null || TZ=Asia/Seoul date -d '2 days ago' +%Y%m%d)
-for TY in B I; do for CLS in Y K; do
-  echo "== pblntf_ty=$TY corp_cls=$CLS"
-  curl -s "https://opendart.fss.or.kr/api/list.json?crtfc_key=$K&bgn_de=$BGN&end_de=$(TZ=Asia/Seoul date +%Y%m%d)&pblntf_ty=$TY&corp_cls=$CLS&page_count=100" \
-    | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-print("status:", d.get("status"), d.get("message"), "· 총", d.get("total_count"), "건")
-for it in (d.get("list") or []): print(it["rcept_dt"], "|", it["corp_name"], "|", it["report_nm"])'
-done; done
+END=$(TZ=Asia/Seoul date +%Y%m%d)
+K="$K" BGN="$BGN" END="$END" python3 - <<'PY' > "$SCRATCH/cand.tsv"
+import json, os, re, sys, time, urllib.request
+KEEP = re.compile(r"영업\(잠정\)실적|단일판매ㆍ공급계약체결|자기주식취득결정|주식소각결정|유상증자결정|회사분할결정|회사합병결정")
+DROP = re.compile(r"자회사의 주요경영사항|종속회사의주요경영사항|철회")
+SUFFIX = {"Y": ".KS", "K": ".KQ"}
+rows, seen = {}, 0
+for ty in ("B", "I"):
+    for cls in ("Y", "K"):
+        page = 1
+        while True:
+            url = ("https://opendart.fss.or.kr/api/list.json?crtfc_key={K}&bgn_de={BGN}&end_de={END}"
+                   "&pblntf_ty={ty}&corp_cls={cls}&page_count=100&page_no={page}").format(ty=ty, cls=cls, page=page, **os.environ)
+            d = json.load(urllib.request.urlopen(url, timeout=30))
+            if d.get("status") not in ("000", "013"):   # 013 = 조회 결과 없음
+                sys.exit(f"[실패] DART {ty}/{cls} p{page}: {d.get('status')} {d.get('message')}")
+            for it in d.get("list") or []:
+                seen += 1
+                nm = it["report_nm"].strip()
+                if nm.startswith("[") or DROP.search(nm) or not KEEP.search(nm) or not it.get("stock_code"):
+                    continue
+                t, kind = it["stock_code"] + SUFFIX[cls], re.sub(r"\s+", " ", nm)
+                if t in rows:
+                    rows[t]["memo"] += f" · {kind} {it['rcept_no']}"
+                else:
+                    rows[t] = {"kind": kind, "filed": it["rcept_dt"], "memo": f"{it['corp_name']} {it['rcept_no']}"}
+            if page >= int(d.get("total_page") or 1):
+                break
+            page += 1
+            time.sleep(0.2)
+print(f"# DART {os.environ['BGN']}~{os.environ['END']} B·I × 유가·코스닥 전체 {seen}건 → 유형 통과 {len(rows)}개사")
+for t, r in rows.items():
+    f = r["filed"]
+    print(f"{t}\t{r['kind']}\t\t{f[:4]}-{f[4:6]}-{f[6:]}\t{r['memo']}")
+PY
+head -1 "$SCRATCH/cand.tsv"
 ```
-
-- `I`는 건수가 많다. 정정공시·자회사 공시·소액 계약은 점수표 ①에서 떨어지므로 눈으로 거르되,
-  **걸러낸 기준을 점수표 아래에 적는다.** `total_count`가 100을 넘으면 `page_no=2`를 이어 받는다.
 
 - 검색어·공시유형을 바꿨으면 **무엇으로 바꿨는지 `## 방법론 · 재현`에 적는다.** 경로를 바꾸는 것은
   허용되지만 조용히 바꾸는 것은 허용되지 않는다.
@@ -196,6 +251,53 @@ done; done
 - **미국 실적 발표는 KST 새벽(장 마감 직후)이나 밤(장 개장 전)에 나온다.** 07:00 실행은 전날 마감 후
   접수분까지 보이지만 **당일 아침 접수분은 아직 없다.** 한국도 같다 — 07:00은 DART 접수 개시 전이라
   당일 접수분이 없다. 뉴스 창을 캘린더 3일로 두는 이유가 이것이다.
+
+### 후보 추리기 — 유형 → 거래대금 컷 → 정해진 순서
+
+접수 목록은 3일에 수백 건이다. 거기서 3~5개를 **눈으로** 고르면 같은 날 다시 돌려도 다른 후보가 나오고,
+날짜로 시장을 고정한 재현성이 이 단계에서 새 나간다. 그래서 추리는 순서를 고정한다.
+
+**① 유형** — 위 명령이 거른다. 이 표가 마스터다(명령의 `KEEP`·`ITEMS`와 같다).
+
+| 시장 | 남기는 공시 | 빼는 공시 |
+|---|---|---|
+| 한국 | 영업(잠정)실적(공정공시) · 단일판매ㆍ공급계약체결 · 자기주식취득결정 · 주식소각결정 · 유상증자결정 · 회사분할결정 · 회사합병결정 (유가증권·코스닥 같은 기준) | 정정·첨부정정(`[`로 시작) · 자회사·종속회사의 주요경영사항 · 철회 |
+| 미국 | 8-K Item 2.02(실적) · 2.01(인수·매각 완료) · 1.01(중요 계약) | 티커 없는 제출자 |
+
+**② 거래대금 컷과 정렬** — `screen_candidates.py`가 한다. 기준과 순서는 스크립트 docstring이 마스터다.
+
+```bash
+# 7일 제외 목록(1단계와 같은 계산)을 쉼표로 넘긴다. 셸 상태는 이어지지 않으므로 여기서 다시 계산한다.
+CUTOFF=$(TZ=Asia/Seoul date -v-7d +%F 2>/dev/null || TZ=Asia/Seoul date -d '7 days ago' +%F)
+EXCL=$(ls briefs/*.md | sed -n 's#briefs/\([0-9-]\{10\}\)-\(.*\)\.md#\1 \2#p' | awk -v c="$CUTOFF" '$1 >= c {print $2}' | paste -sd, -)
+python3 scripts/screen_candidates.py "$SCRATCH/cand.tsv" -d "$SCRATCH/screen" --exclude "$EXCL" > "$SCRATCH/screen.md"
+grep -E '후보|^- ' "$SCRATCH/screen.md"
+```
+
+- 20봉 평균 거래대금이 **③의 0점 경계(KRW 10억원 / USD $20M) 미만이면 점수표에 올리지 않는다.**
+  조건 가격에 체결되지 않는 종목은 이 저장소가 고르는 "조건을 쓸 수 있는 종목"이 아니다.
+- 정렬은 **8-K Item(2.02 → 2.01 → 1.01) → 중요도 비율 ↓ → 거래대금 ↓ → 티커 ↑**이다. 위에서 5개가 `후보`다.
+- 미국은 1~3일치 수백 개사를 조회하므로 몇 분 걸린다. 한 번 받은 원자료는 다시 받지 않는다.
+
+**③ 한국은 비율을 채워 다시 돌린다** — 첫 실행에서 `통과`·`후보`가 된 행만 원문(`document.xml`)을 열어
+`cand.tsv`의 비율 칸(3열)에 적고 같은 명령을 다시 돌린다. 원자료를 다시 받지 않으므로 순서만 바뀐다.
+비율은 **사건 크기 ÷ 회사 크기**이고, 숫자는 그 공시 원문에 적힌 것만 쓴다.
+
+| 유형 | 비율 (%) |
+|---|---|
+| 단일판매ㆍ공급계약체결 | 공시의 "최근 매출액 대비(%)" 그대로 |
+| 영업(잠정)실적 | \|당기 영업이익 − 전년동기 영업이익\| ÷ 전년동기 매출액 × 100 (부호는 메모에 적는다) |
+| 자기주식취득결정 · 주식소각결정 · 유상증자결정 | 대상 주식수 ÷ 발행주식총수 × 100 |
+| 회사분할결정 · 회사합병결정 | 분할·합병 대상의 최근 사업연도 매출액 ÷ 회사 매출액 × 100 |
+
+공시 원문에 그 숫자가 없으면 비율 칸을 비운다(비율 없는 행은 비율 있는 행 뒤로 간다). 추정해서 채우지 않는다.
+미국은 이 단계가 없다 — 8-K에는 같은 기준으로 잴 비율이 없다.
+
+**④ 점수표로** — `후보` 5개를 3단계 점수표에 올린다. `screen.md`의 요약 줄(입력·통과·후보 건수,
+기준)과 `후보` 행은 1절 "선정 과정"에, 실행한 명령은 `## 방법론 · 재현`에 그대로 싣는다.
+점수표에서 ②가 0으로 탈락해 남은 후보가 3개 미만이 되면 `통과` 행을 순번대로 이어 올린다.
+`통과`까지 다 써도 3개가 안 되면 아래 뉴스 보강으로 간다. 뉴스로 찾은 후보도 `cand.tsv`에 한 줄
+더해 같은 컷을 거친다 — 경로가 달라도 유동성 기준은 같다.
 
 ### 뉴스 보강 — 접수 목록으로 3~5개가 안 찼을 때
 
@@ -231,7 +333,7 @@ done; done
 |---|---|---|
 | ① 촉매의 구체성 | 뉴스가 가리키는 사건이 **날짜와 숫자를 가진 사건**인가 | "AI 수혜 기대" |
 | ② 검증 가능성 | 그 사건을 확인할 **1차 공시가 실제로 존재**하는가(제출일까지 확인) | 공시 없음, IR 구두 언급뿐 |
-| ③ 유동성 | 20일 평균 거래대금이 충분한가(얇으면 조건이 체결되지 않는다) | 호가가 비어 있는 종목 |
+| ③ 유동성 | 20봉 평균 거래대금이 충분한가(얇으면 조건이 체결되지 않는다). **KRW 100억원 이상 2 / 10~100억원 1 · USD $100M 이상 2 / $20~100M 1** | 10억원 / $20M 미만 — 무인 실행에서는 2단계 컷에서 이미 빠진다(지정 종목이면 0으로 남는다) |
 | ④ 일정 근접성 | 다음 확인 이벤트(실적 발표 등)가 **가까운가** | 다음 공시까지 3개월 이상 |
 | ⑤ 가격 위치의 명확성 | 지지/저항이 뚜렷해 **무효화 조건을 가격으로 쓸 수 있는가** | 신고가 공백 구간, 근거 레벨 없음 |
 
@@ -753,7 +855,7 @@ AGENTS.md "읽는 사람을 전제한다"의 세부다 — 같은 정밀도를 �
 `technicals.py --emit facts` 출력을 그대로 붙여넣고, 아래를 덧붙인다.
 
 - 원자료 수집: (실행한 `fetch_ohlcv.py` 커맨드 그대로)
-- 후보 발굴 경로: (2단계에서 실제로 쓴 명령·검색어. 기본 경로를 바꿨으면 그 사유까지)
+- 후보 발굴 경로: (2단계에서 실제로 쓴 명령·검색어와 `screen_candidates.py` 요약 줄. 기본 경로를 바꿨으면 그 사유까지)
 - 거시 지표: (쓴 계열과 **게이트를 통과한 근거가 된 공시 문장**. 안 썼으면 "없음", 키가 없어
   생략했으면 그 사실을 적는다)
 - 교차 검증 결과: (`brief-verifier` 판정 — 차단 n건 / 확인 필요 n건, 그중 무엇을 어떻게 고쳤는지)
