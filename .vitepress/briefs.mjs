@@ -28,7 +28,7 @@ export function readBriefs() {
       const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '') // 프런트매터가 있으면 제거
 
       const h1 = /^#\s+(.+)$/m.exec(body)
-      // 한 줄 요약은 두 줄이다(AGENTS.md "읽는 사람을 전제한다") — 결론 한 문장 + 스탠스.
+      // 한 줄 요약은 두 줄이다(daily-brief 스킬 7단계 "문장 규칙") — 결론 한 문장 + 스탠스.
       // 인용문 블록을 통째로 잡아 줄을 " · "로 이어 붙인다. 한 줄짜리 옛 브리프도 그대로 동작한다.
       const quote = /^>[^\n]*(?:\n>[^\n]*)*/m.exec(body)
       const summary = quote

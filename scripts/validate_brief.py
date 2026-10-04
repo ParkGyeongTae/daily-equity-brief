@@ -60,7 +60,7 @@ BANNED = [
 # 템플릿을 채우지 않고 남긴 흔적
 PLACEHOLDERS = [r"<종목명>", r"<코드/티커>", r"<조건>", r"<있으면>", r"\bTBD\b", r"\bTODO\b"]
 
-# 한 줄 요약 첫 줄의 상한 (AGENTS.md "읽는 사람을 전제한다").
+# 한 줄 요약 첫 줄의 상한 (daily-brief 스킬 7단계 "문장 규칙").
 SUMMARY_MAX = 60
 # 0절 "현재 스탠스"가 고르는 값. 요약 둘째 줄도 이 중 하나로 시작한다.
 STANCES = ("진입 대기", "조건 충족", "관심", "관망", "보류")
@@ -74,10 +74,10 @@ GLOSS_TERMS = [
 # 7절 지표 표에서 "비고" 칸을 비워둘 수 없는 약어.
 INDICATOR_ROWS = re.compile(r"^(SMA|RSI|MACD|ATR|볼린저|%B)")
 
-# ① 결론 층 (AGENTS.md "세 층으로 쌓는다"). 0절보다 앞에 오고, 1분에 읽힌다.
+# ① 결론 층 (daily-brief 스킬 7단계 "세 층으로 쌓는다"). 0절보다 앞에 오고, 1분에 읽힌다.
 LEAD = "지금 무엇을 하는가"
 LEAD_ROWS = ("산다", "판다", "계획을 버린다")
-LEAD_MAX = 900  # AGENTS.md "세 층으로 쌓는다" — 표 포함 900자
+LEAD_MAX = 900  # daily-brief 스킬 7단계 "세 층으로 쌓는다" — 표 포함 900자
 # 결론 절의 가격은 9절 표에서 가져온 것이어야 한다 — 두 곳에 쓰면 어긋난다.
 MONEY_RE = re.compile(r"[₩$]\s?[\d,]+(?:\.\d+)?")
 # ③ 감사 층 — 제목은 남기고 본문만 접는다.
@@ -86,7 +86,7 @@ FOLDED = ("출처", "방법론")
 # 1절에서 접어야 하는 절차 기록 — 회사 분석이 아니라 에이전트의 작업 기록이다.
 PROCESS_NOTES = ("제외 목록", "시장 판정", "후보 점수표")
 
-# 2절 소절 — 분석 전에 배경을 준다 (AGENTS.md "분석 전에 배경을 먼저 준다").
+# 2절 소절 — 분석 전에 배경을 준다 (daily-brief 스킬 7단계 "분석 전에 배경을 먼저 준다").
 BACKGROUND = ("이 산업은 어떻게 돌아가는가", "이 회사는 그 안에서 무엇을 하는가")
 
 
@@ -379,7 +379,7 @@ def check_background(rep: Report, sections: list[dict]) -> None:
 
 
 def check_glossary(rep: Report, lines: list[str], sections: list[dict]) -> None:
-    """처음 나온 전문 용어를 풀었는가 (AGENTS.md "읽는 사람을 전제한다").
+    """처음 나온 전문 용어를 풀었는가 (daily-brief 스킬 7단계 "문장 규칙").
 
     기계가 볼 수 있는 것은 "괄호가 붙었는가"뿐이다. 괄호 안의 설명이 실제로 도움이 되는지는
     `brief-verifier`가 본다. 그래서 전부 경고다 — 커밋을 막지 않고 눈에만 띄게 한다.
