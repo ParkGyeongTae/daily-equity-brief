@@ -8,7 +8,7 @@
 **이 스크립트가 검사하지 못하는 것**이 검사하는 것보다 중요하다. 숫자가 공시 원문과
 일치하는지, 논거가 타당한지, 출처 URL이 실제로 그 숫자를 담고 있는지는 사람과
 `brief-verifier` 서브에이전트의 몫이다. 여기서 보는 것은 **기계가 판정할 수 있는 것뿐**이다
-— 파일명, 사이트가 파싱하는 머리 두 줄, 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
+— 파일명, 사이트가 파싱하는 머리(h1 + 세 줄 요약), 빈 절, 면책, 금지 표현, 1절의 후보 점수표, 9절의 구조적
 요건(가격·논거 무효화 쌍, R 계산식, 근거 태그, 가격 근거의 편중), 6절 배수 밴드의 기준점, 출처 절의 필수 항목, 기준 종가일 일관성,
 거시를 쓴 경우의 관측일·조회일 표기.
 
@@ -26,7 +26,10 @@ FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)\.md$")
 # briefs/ 안에 있지만 브리프가 아닌 사이트 페이지 — 목록(index)과 조건 원장(ledger).
 SITE_PAGES = {"index.md", "ledger.md"}
 H1_RE = re.compile(r"^#\s+(.+?)\s*\((.+?)\)\s*—\s*(\d{4}-\d{2}-\d{2})\s*$")
-QUOTE_RE = re.compile(r"^>\s*한 줄 요약\s*[:：]\s*(.+)$")
+QUOTE_RE = re.compile(r"^>\s*세 줄 요약\s*[:：]\s*(.+)$")
+# 2026-10-05까지의 브리프는 두 줄짜리 "한 줄 요약"이다. 그 날짜까지만 받아준다.
+LEGACY_QUOTE_RE = re.compile(r"^>\s*한 줄 요약\s*[:：]\s*(.+)$")
+LEGACY_UNTIL = "2026-10-05"
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 SEP_ROW_RE = re.compile(r"^\|[\s:|-]+\|$")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -60,9 +63,9 @@ BANNED = [
 # 템플릿을 채우지 않고 남긴 흔적
 PLACEHOLDERS = [r"<종목명>", r"<코드/티커>", r"<조건>", r"<있으면>", r"\bTBD\b", r"\bTODO\b"]
 
-# 한 줄 요약 첫 줄의 상한 (daily-brief 스킬 7단계 "문장 규칙").
+# 세 줄 요약 첫째·둘째 줄의 상한 (daily-brief 스킬 7단계 "문장 규칙").
 SUMMARY_MAX = 60
-# 0절 "현재 스탠스"가 고르는 값. 요약 둘째 줄도 이 중 하나로 시작한다.
+# 0절 "현재 스탠스"가 고르는 값. 요약 마지막 줄도 이 중 하나로 시작한다.
 STANCES = ("진입 대기", "조건 충족", "관심", "관망", "보류")
 
 # 처음 나올 때 괄호로 뜻을 풀어야 하는 용어.
@@ -142,7 +145,7 @@ def body_text(section: dict | None) -> str:
 
 
 def check_head(rep: Report, lines: list[str], file_date: str, file_code: str) -> None:
-    """사이트 목록(.vitepress/briefs.mjs)이 파싱하는 머리 두 줄."""
+    """사이트 목록(.vitepress/briefs.mjs)이 파싱하는 머리 — h1과 세 줄 요약."""
     meaningful = [(i, t) for i, t in enumerate(lines, start=1) if t.strip()]
     if not meaningful:
         rep.err(0, "파일이 비어 있다")
@@ -160,33 +163,50 @@ def check_head(rep: Report, lines: list[str], file_date: str, file_code: str) ->
             rep.err(i, f"h1의 코드({code})에 파일명 코드({file_code})가 없다")
 
     if len(meaningful) < 2:
-        rep.err(i, "한 줄 요약 인용문이 없다")
+        rep.err(i, "세 줄 요약 인용문이 없다")
         return
     j, second = meaningful[1]
     q = QUOTE_RE.match(second)
-    if not q:
-        rep.err(j, "둘째 줄이 `> 한 줄 요약: ...` 형식이 아니다 (사이트 목록이 이 줄을 파싱한다)")
+    legacy = LEGACY_QUOTE_RE.match(second)
+    if legacy and file_date <= LEGACY_UNTIL:
+        q, n_text = legacy, 1  # 옛 형식: 결론 한 줄 + 스탠스 한 줄
+    elif q:
+        n_text = 2  # 사건 한 줄 + 해석 한 줄 + 스탠스 한 줄
+    else:
+        rep.err(j, "둘째 줄이 `> 세 줄 요약: ...` 형식이 아니다 (사이트 목록이 이 줄을 파싱한다)")
         return
 
-    head = q.group(1).strip()
-    if len(head) < 10:
-        rep.warn(j, "한 줄 요약이 지나치게 짧다")
-    if len(head) > SUMMARY_MAX:
-        rep.err(
-            j,
-            f"한 줄 요약 첫 줄이 {len(head)}자다 ({SUMMARY_MAX}자 이내) — "
-            "결론 한 문장만 남기고 조건은 9절로 내린다",
-        )
+    # 스탠스 앞의 문장 줄들: 세 줄 요약이면 ① 무슨 일이 있었나 ② 어떻게 읽었나.
+    quote = [(j, q.group(1).strip())]
+    for k, t in meaningful[2:2 + n_text]:
+        if not t.lstrip().startswith(">"):
+            break
+        quote.append((k, t.lstrip().lstrip(">").strip()))
+    names = ("첫", "둘째", "셋째")
+    for idx, (k, text) in enumerate(quote[:n_text]):
+        if any(text.startswith(w) for w in STANCES):
+            rep.err(k, f"요약 {names[idx]} 줄이 스탠스로 시작한다 — 스탠스는 마지막 줄에만 쓴다")
+            return
+        if len(text) < 10:
+            rep.warn(k, f"요약 {names[idx]} 줄이 지나치게 짧다")
+        if len(text) > SUMMARY_MAX:
+            rep.err(
+                k,
+                f"요약 {names[idx]} 줄이 {len(text)}자다 ({SUMMARY_MAX}자 이내) — "
+                "한 문장만 남기고 조건은 9절로 내린다",
+            )
 
-    # 셋째 줄: 스탠스와 그 가격. 사이트 목록은 두 줄을 이어 붙인다.
-    if len(meaningful) < 3 or not meaningful[2][1].lstrip().startswith(">"):
-        rep.err(j, "한 줄 요약 둘째 줄이 없다 — `> <스탠스> — <가격 조건>` 한 줄을 인용문에 잇는다")
+    # 마지막 줄: 스탠스와 그 가격. 사이트 목록은 인용문 줄을 모두 이어 붙인다.
+    if len(quote) < n_text + 1:
+        rep.err(j, f"요약 {names[n_text]} 줄이 없다 — `> <스탠스> — <가격 조건>` 한 줄을 인용문에 잇는다")
         return
-    k, third = meaningful[2]
-    stance = third.lstrip().lstrip(">").strip()
+    k, stance = quote[n_text]
     if not any(stance.startswith(w) for w in STANCES):
-        rep.err(k, f"요약 둘째 줄이 스탠스로 시작하지 않는다 — {' / '.join(STANCES)} 중 하나")
+        rep.err(k, f"요약 {names[n_text]} 줄이 스탠스로 시작하지 않는다 — {' / '.join(STANCES)} 중 하나")
         return
+    nxt = meaningful[2 + n_text] if len(meaningful) > 2 + n_text else None
+    if nxt and nxt[1].lstrip().startswith(">"):
+        rep.err(nxt[0], f"요약이 {n_text + 1}줄을 넘는다 — 스탠스 줄에서 인용문을 끝낸다")
 
     # 0절 "현재 스탠스"와 어긋나면 둘 중 하나가 낡은 것이다.
     head_w = next((w for w in STANCES if stance.startswith(w)), None)
@@ -195,7 +215,7 @@ def check_head(rep: Report, lines: list[str], file_date: str, file_code: str) ->
         if len(cells) >= 2:
             snap_w = next((w for w in STANCES if cells[1].startswith(w)), None)
             if snap_w and head_w and snap_w != head_w:
-                rep.err(k, f"요약 둘째 줄의 스탠스({head_w})가 0절 '현재 스탠스'({snap_w})와 다르다")
+                rep.err(k, f"요약 스탠스 줄({head_w})이 0절 '현재 스탠스'({snap_w})와 다르다")
         break
 
 
