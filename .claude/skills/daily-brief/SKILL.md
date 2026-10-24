@@ -1033,6 +1033,83 @@ https://parkgyeongtae.github.io/daily-equity-brief/briefs/<파일명>
 | 오늘 파일이 이미 있어 끝냄 | 보내지 않는다 — 그 파일을 쓴 실행이 이미 보냈다 |
 
 `*굵게*`는 Slack 문법이다(`**`가 아니다). 메시지는 한 실행에 한 번이다 — 재시도로 같은 알림을 두 번 보내지 않는다.
+예외는 아래 "실행 정보 답글" 하나다 — 채널 메시지가 아니라 그 알림의 스레드 답글이다.
+
+### 실행 정보 답글
+
+알림을 보냈으면(위 표의 "보내지 않는다"가 아니면) 그 알림의 스레드에 **이번 실행의 토큰 사용량**을
+답글 하나로 단다. 알림 전송 응답의 메시지 `ts`를 `thread_ts`로 쓴다. 알림 전송이 실패했으면 답글도 달지 않는다.
+
+사용량은 Claude Code가 `~/.claude/projects/` 아래에 남기는 대화 기록(JSONL)에서 아래 명령으로 합산한다.
+**서브에이전트(`filings-researcher`·`brief-verifier`)의 기록은 `<세션>/subagents/`에 따로 남으므로 함께 더한다**
+— 이 절차에서는 서브에이전트 몫이 메인보다 클 수 있다.
+
+```bash
+python3 - <<'EOF'
+import glob, json, os
+from datetime import datetime, timezone, timedelta
+
+mains = set()
+for root in {os.path.expanduser("~"), "/root", "/home/user"}:
+    mains.update(glob.glob(f"{root}/.claude/projects/*/*.jsonl"))
+if not mains:
+    print(json.dumps({"error": "기록 파일 없음"}))
+    raise SystemExit
+
+main = max(mains, key=os.path.getmtime)
+subs = sorted(glob.glob(f"{main[:-len('.jsonl')]}/subagents/*.jsonl"))
+
+def read(path):
+    usage, first_ts, models = {}, None, set()
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            first_ts = first_ts or e.get("timestamp")
+            m = e.get("message")
+            if e.get("type") == "assistant" and isinstance(m, dict) and m.get("usage"):
+                # 한 응답이 여러 줄로 기록되면 같은 message.id가 반복되므로 마지막 값만 쓴다
+                usage[m.get("id") or n] = m["usage"]
+                if m.get("model"):
+                    models.add(m["model"])
+    return usage, first_ts, models
+
+usage, first_ts, models = read(main)
+main_responses = len(usage)
+for p in subs:
+    u, _, ms = read(p)
+    usage.update({(p, k): v for k, v in u.items()})
+    models |= ms
+
+keys = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+result = {k: sum(u.get(k) or 0 for u in usage.values()) for k in keys}
+result.update(responses=len(usage), main_responses=main_responses, subagents=len(subs),
+              models=sorted(models), file=main)
+if first_ts:
+    start = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+    result["start_kst"] = start.astimezone(timezone(timedelta(hours=9))).strftime("%H:%M")
+    result["elapsed_sec"] = int((datetime.now(timezone.utc) - start).total_seconds())
+print(json.dumps(result, ensure_ascii=False))
+EOF
+```
+
+출력값으로 아래 형식의 답글을 쓴다. 숫자는 천 단위 쉼표를 넣고, 소요 시간은 `elapsed_sec`을 `N분 N초`로 바꾼다.
+서브에이전트 응답 수는 `responses - main_responses`다.
+
+```text
+⚙️ 실행 정보
+• 토큰: 입력 12,345 · 출력 134,567 · 캐시 쓰기 523,456 · 캐시 읽기 9,234,567
+• 응답: 166회 (메인 55 · 서브에이전트 3개 111)
+• 소요 시간: 41분 37초 (시작 07:00 KST, 집계 시점까지)
+• 모델: claude-opus-5-5
+```
+
+- 위 "본문에 새 숫자를 쓰지 않는다"는 브리프 내용에 대한 규칙이다. 이 답글의 숫자는 브리프가 아니라
+  실행 기록이므로 명령 출력을 쓴다. **출력 그대로 쓰고 추정하거나 반올림하지 않는다.** 집계 이후의 마지막 몇 턴은 포함되지 않는다
+- 명령이 실패하거나 `error`가 나오면 해당 줄에 `집계 불가 (오류 내용)`을 쓰고, 나머지 줄은 알 수 있는 값만 쓴다
+- 답글 전송이 실패해도 다시 만들지 않고 최종 보고에 적는다 — 알림과 같은 규칙이다
 
 ### 최종 보고
 
@@ -1044,7 +1121,7 @@ https://parkgyeongtae.github.io/daily-equity-brief/briefs/<파일명>
 - **지난 조건 대조 결과** — 원장에서 판정이 바뀐 브리프(충족·이탈·만료)와, 대조에 실패한 건
 - `validate_brief.py` 결과와 `brief-verifier` 판정(차단 n건 / 확인 필요 n건), 고친 내용
 - 커밋 해시, 배포 확인 HTTP 코드, 사이트 URL
-- Slack 알림 전송 여부(실패했으면 그 사유)
+- Slack 알림 전송 여부(실패했으면 그 사유)와 실행 정보 답글 전송 여부
 
 무인 실행에서는 이 보고가 routine 실행 기록에만 남는다. 그러므로 **되짚을 수 있어야 하는 것은 보고가
 아니라 보고서에 적는다** — `## 방법론 · 재현`이 그 자리다. 보고는 읽히지 않을 수 있고, 커밋된 문서는 남는다.
