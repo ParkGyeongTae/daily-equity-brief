@@ -1011,6 +1011,8 @@ gh workflow run deploy.yml --ref main
 200을 확인하기 전에 보내면 링크가 404인 알림이 간다. 채널 ID는 이름으로 찾는다
 (`slack_list_user_channels`의 `name_prefix: "daily-equity-brief"`). 채널을 못 찾거나 전송이 실패하면
 다시 만들지 않고 최종 보고에 적는다 — 알림 실패로 커밋을 되돌리지 않는다.
+전송은 `slack_send_message`로 바로 한다. 무인 실행이므로 **초안 도구(`slack_send_message_draft`)는 쓰지 않는다** —
+초안은 채널에 게시되지 않는다.
 
 **본문에 새 숫자를 쓰지 않는다.** 브리프의 h1과 머리 인용문 세 줄을 **그대로 옮긴다.** Slack은
 검증을 거치지 않는 경로이므로, 거기서 숫자를 다시 요약하거나 반올림하면 검증 안 된 숫자가 생긴다.
